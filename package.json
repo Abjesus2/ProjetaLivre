@@ -1,0 +1,24 @@
+{
+  "name": "projetalivre",
+  "private": true,
+  "version": "1.0.0",
+  "description": "ProjetaLivre — CAD 2D livre no navegador: abra, edite e salve DWG/DXF/SVG em vários formatos.",
+  "type": "module",
+  "license": "GPL-3.0-or-later",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@mlightcad/libredwg-web": "^0.7.16",
+    "@tarikjabiri/dxf": "^2.9.0",
+    "dxf-parser": "^1.1.2",
+    "jspdf": "^4.2.1"
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2",
+    "vite": "^8.3.4"
+  }
+}

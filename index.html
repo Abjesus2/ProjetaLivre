@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="pt-BR" data-theme="ink">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ProjetaLivre — CAD livre no navegador</title>
+    <meta name="description" content="ProjetaLivre: abra, edite e salve desenhos DWG, DXF e SVG direto no navegador. CAD 2D livre, sem instalação." />
+    <meta name="theme-color" content="#0d0c10" />
+    <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Space+Grotesk:wght@400;500;700&family=Unbounded:wght@400;700;900&display=swap" rel="stylesheet" />
+  </head>
+  <body>
+    <div id="app">
+      <!-- ============ Prancheta ============ -->
+      <main id="stage">
+        <canvas id="cv" aria-label="Área de desenho"></canvas>
+
+        <header class="island island-brand" data-reveal>
+          <button class="brand" id="btn-home" title="Voltar ao portal">
+            <svg class="brand-mark" viewBox="0 0 48 48" aria-hidden="true">
+              <circle class="bm-ring" cx="24" cy="24" r="20" />
+              <path class="bm-leg l" d="M24 10 L13 38" />
+              <path class="bm-leg r" d="M24 10 L35 38" />
+              <path class="bm-arc" d="M13 38 A 24 24 0 0 0 35 38" />
+              <circle class="bm-hinge" cx="24" cy="10" r="3.4" />
+            </svg>
+            <span class="brand-word">Projeta<b>Livre</b></span>
+          </button>
+          <input id="doc-name" class="doc-name" spellcheck="false" aria-label="Nome do desenho" />
+          <span id="dirty-dot" class="dirty-dot" title="Alterações não salvas"></span>
+        </header>
+
+        <div class="island island-actions" data-reveal>
+          <button class="act" data-act="open" title="Abrir (Ctrl+O)"></button>
+          <button class="act act-hot" data-act="save" title="Salvar como… (Ctrl+S)"><span>Salvar</span></button>
+          <span class="sep"></span>
+          <button class="act" data-act="undo" title="Desfazer (Ctrl+Z)"></button>
+          <button class="act" data-act="redo" title="Refazer (Ctrl+Y)"></button>
+          <button class="act" data-act="fit" title="Enquadrar tudo (Z)"></button>
+          <span class="sep"></span>
+          <button class="act" data-act="theme" title="Tinta / Papel"></button>
+          <button class="act" data-act="help" title="Atalhos e comandos (F1)"></button>
+        </div>
+
+        <nav id="dock" class="dock" aria-label="Ferramentas" data-reveal></nav>
+
+        <aside id="inspector" class="inspector" data-reveal>
+          <div class="tabs" role="tablist">
+            <button class="tab on" data-tab="layers" role="tab"><span>Camadas</span></button>
+            <button class="tab" data-tab="props" role="tab"><span>Propriedades</span></button>
+          </div>
+          <section class="card" data-panel="layers">
+            <div class="card-head">
+              <h2>Camadas</h2>
+              <button class="mini" id="layer-add" title="Nova camada"></button>
+            </div>
+            <ul id="layer-list" class="layer-list"></ul>
+          </section>
+          <section class="card" data-panel="props" hidden>
+            <div class="card-head"><h2>Propriedades</h2><span id="sel-count" class="badge">0</span></div>
+            <div id="props" class="props"></div>
+          </section>
+        </aside>
+
+        <footer class="console" data-reveal>
+          <ol id="log" class="log" aria-live="polite"></ol>
+          <div class="console-row">
+            <div class="toggles">
+              <button class="knob on" data-toggle="osnap" title="Snap a objetos (F3)"><i></i>OBJ</button>
+              <button class="knob" data-toggle="grid" title="Snap à grade (F9)"><i></i>GRADE</button>
+              <button class="knob" data-toggle="ortho" title="Modo orto (F8)"><i></i>ORTO</button>
+              <button class="knob on" data-toggle="showgrid" title="Mostrar grade (F7)"><i></i>VER</button>
+            </div>
+            <label class="prompt-wrap">
+              <span id="prompt" class="prompt"></span>
+              <span class="caret">›</span>
+              <input id="cmd" class="cmd" autocomplete="off" spellcheck="false" placeholder="digite um comando… (L, C, PL, M, CO, TR, AJUDA)" />
+            </label>
+            <output id="coords" class="coords">0,00 · 0,00</output>
+          </div>
+        </footer>
+
+        <div id="radial" class="radial" hidden></div>
+        <div id="dropzone" class="dropzone" hidden><div><b>Solte para abrir</b><span>DWG · DXF · SVG · PLV</span></div></div>
+        <div id="busy" class="busy" hidden><div class="busy-pen"></div><b id="busy-text">Lendo…</b></div>
+      </main>
+
+      <!-- ============ Portal ============ -->
+      <section id="portal" class="portal">
+        <div class="portal-bg" aria-hidden="true"><i></i><i></i><i></i></div>
+        <div class="portal-inner">
+          <p class="kicker">CAD 2D livre · direto no navegador · sem instalar nada</p>
+          <svg class="title" viewBox="0 0 1000 300" role="img" aria-label="ProjetaLivre">
+            <text class="t1" x="0" y="130">PROJETA</text>
+            <text class="t2" x="120" y="270">LIVRE</text>
+            <circle class="pen" r="9" cx="0" cy="0" />
+          </svg>
+          <div class="tickets">
+            <button class="ticket" data-start="new">
+              <span class="ticket-no">01</span>
+              <b>Nova prancheta</b>
+              <small>Comece do zero com camadas, snaps e cotas</small>
+            </button>
+            <button class="ticket ticket-hot" data-start="open">
+              <span class="ticket-no">02</span>
+              <b>Abrir arquivo</b>
+              <small>DWG, DXF, SVG ou PLV — ou arraste aqui</small>
+            </button>
+            <button class="ticket" data-start="demo">
+              <span class="ticket-no">03</span>
+              <b>Ver exemplo</b>
+              <small>Uma planta baixa pronta para mexer</small>
+            </button>
+          </div>
+          <p class="credits">Leitura de DWG por <a href="https://github.com/mlightcad/libredwg-web" target="_blank" rel="noopener">libredwg-web</a> (LibreDWG) · DXF por <a href="https://github.com/gdsestimating/dxf-parser" target="_blank" rel="noopener">dxf-parser</a> e <a href="https://github.com/dxfjs/writer" target="_blank" rel="noopener">dxfjs</a> · PDF por <a href="https://github.com/parallax/jsPDF" target="_blank" rel="noopener">jsPDF</a></p>
+        </div>
+        <div class="ribbon" aria-hidden="true"><div class="ribbon-track"></div></div>
+      </section>
+
+      <!-- ============ Exportar ============ -->
+      <dialog id="export" class="modal">
+        <form method="dialog" class="modal-inner">
+          <header class="modal-head">
+            <h2>Salvar como<em>…</em></h2>
+            <button class="mini" value="cancel" title="Fechar"></button>
+          </header>
+          <div id="formats" class="formats"></div>
+          <div id="fmt-options" class="fmt-options"></div>
+          <footer class="modal-foot">
+            <span id="fmt-note" class="fmt-note"></span>
+            <button id="do-export" class="go" type="button"><span>Gerar arquivo</span></button>
+          </footer>
+        </form>
+      </dialog>
+
+      <!-- ============ Ajuda ============ -->
+      <dialog id="help" class="modal">
+        <form method="dialog" class="modal-inner">
+          <header class="modal-head"><h2>Comandos <em>&amp;</em> atalhos</h2><button class="mini" value="cancel" title="Fechar"></button></header>
+          <div id="help-body" class="help-body"></div>
+        </form>
+      </dialog>
+
+      <input id="file" type="file" hidden />
+      <div id="toasts" class="toasts"></div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
