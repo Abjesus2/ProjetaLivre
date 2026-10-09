@@ -1,4 +1,4 @@
-import type { Entity, Pt } from '../core/types';
+import type { Entity, HatchEnt, Pt } from '../core/types';
 import { dimGeometry, polySegments, sweep, TEXT_EM, LINE_GAP } from '../core/geom';
 import type { View } from './view';
 
@@ -42,13 +42,75 @@ export function pathEntity(ctx: CanvasRenderingContext2D, e: Entity, v: View, co
       drawText(ctx, g.text.p, g.text.h, g.text.text, g.text.rot, v, color);
       break;
     }
+    case 'hatch':
+      for (const l of e.loops) { l.forEach((p, i) => { const q = S(p); if (i) ctx.lineTo(q.x, q.y); else ctx.moveTo(q.x, q.y); }); if (l.length) ctx.closePath(); }
+      break;
   }
+}
+
+/** Preenche uma hachura: sólida, ou com as linhas do padrão recortadas pelo contorno. */
+export function fillHatch(ctx: CanvasRenderingContext2D, e: HatchEnt, v: View, color: string) {
+  const path = new Path2D();
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const l of e.loops) {
+    l.forEach((p, i) => {
+      const q = v.toScreen(p);
+      if (i) path.lineTo(q.x, q.y); else path.moveTo(q.x, q.y);
+      if (q.x < minX) minX = q.x; if (q.x > maxX) maxX = q.x; if (q.y < minY) minY = q.y; if (q.y > maxY) maxY = q.y;
+    });
+    path.closePath();
+  }
+  if (!isFinite(minX)) return;
+  ctx.save();
+  ctx.fillStyle = color;
+  // espaçamento das linhas do padrão, em pixels
+  const lines = (e.pattern ?? []).map((d) => {
+    const dir = { x: Math.cos(d.angle), y: Math.sin(d.angle) };
+    const gap = Math.abs(d.offset.x * -dir.y + d.offset.y * dir.x) * v.s;
+    return { d, dir, gap };
+  }).filter((l) => l.gap > 0);
+  if (e.solid || !lines.length || lines.some((l) => l.gap < 3)) {
+    ctx.globalAlpha = e.solid ? 0.55 : 0.16;
+    ctx.fill(path, 'evenodd');
+    ctx.restore();
+    return;
+  }
+  ctx.clip(path, 'evenodd');
+  ctx.strokeStyle = color; ctx.lineWidth = 0.8; ctx.globalAlpha = 0.85;
+  const diag = Math.hypot(maxX - minX, maxY - minY);
+  const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
+  ctx.beginPath();
+  for (const { d, dir, gap } of lines) {
+    // direção na tela (y invertido) e normal
+    const sd = { x: dir.x, y: -dir.y }, sn = { x: -sd.y, y: sd.x };
+    const b = v.toScreen(d.base);
+    // distância do centro da área até a linha-base, ao longo da normal
+    const c0 = (cx - b.x) * sn.x + (cy - b.y) * sn.y;
+    const k0 = Math.floor((c0 - diag / 2) / gap), k1 = Math.ceil((c0 + diag / 2) / gap);
+    if (k1 - k0 > 3000) continue;
+    for (let k = k0; k <= k1; k++) {
+      const px = b.x + sn.x * k * gap, py = b.y + sn.y * k * gap;
+      const t = (cx - px) * sd.x + (cy - py) * sd.y;
+      ctx.moveTo(px + sd.x * (t - diag), py + sd.y * (t - diag));
+      ctx.lineTo(px + sd.x * (t + diag), py + sd.y * (t + diag));
+    }
+  }
+  ctx.stroke();
+  ctx.restore();
 }
 
 export function drawText(ctx: CanvasRenderingContext2D, p: Pt, h: number, text: string, rot: number, v: View, color: string) {
   const px = h * v.s * TEXT_EM;
-  if (px < 1.5) return;
   const q = v.toScreen(p);
+  if (px < 1.5) {
+    // texto pequeno demais para ler: mostra só um traço no lugar (como o AutoCAD faz)
+    if (px < 0.35) return;
+    const w = text.split('\n')[0].length * px * 0.6;
+    ctx.save(); ctx.translate(q.x, q.y); ctx.rotate(-rot);
+    ctx.fillStyle = color; ctx.globalAlpha = 0.45; ctx.fillRect(0, -px * 0.6, Math.max(w, 1), Math.max(px * 0.6, 0.6));
+    ctx.restore();
+    return;
+  }
   ctx.save();
   ctx.translate(q.x, q.y);
   ctx.rotate(-rot);

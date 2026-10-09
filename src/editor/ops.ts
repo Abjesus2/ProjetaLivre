@@ -164,7 +164,7 @@ export function explodeEntity(e: Entity): NewEntity[] | null {
     out.push({ type: 'text', ...base, ...g.text });
     return out;
   }
-  if (e.type === 'circle') return null;
+  if (e.type === 'hatch') return e.loops.filter((l) => l.length > 1).map((pts) => ({ type: 'poly', ...base, pts, closed: true }) as NewEntity);
   return null;
 }
 

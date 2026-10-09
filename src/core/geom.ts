@@ -73,6 +73,13 @@ export function transformEntity<E extends Entity>(e: E, m: Mat): E {
       o.pts = o.pts.map((p: Pt) => apply(m, p));
       if (flip && o.bulges) o.bulges = o.bulges.map((b: number) => -b);
       break;
+    case 'hatch':
+      o.loops = o.loops.map((l: Pt[]) => l.map((p) => apply(m, p)));
+      if (o.pattern) o.pattern = o.pattern.map((d: any) => {
+        const dir = applyVec(m, { x: Math.cos(d.angle), y: Math.sin(d.angle) });
+        return { angle: Math.atan2(dir.y, dir.x), base: apply(m, d.base), offset: applyVec(m, d.offset) };
+      });
+      break;
     case 'text': {
       o.p = apply(m, o.p); o.h *= k;
       const v = applyVec(m, { x: Math.cos(o.rot), y: Math.sin(o.rot) });
@@ -142,6 +149,7 @@ export function tessellate(e: Entity, scale = 1): Pt[][] {
     case 'point': return [[e.p, e.p]];
     case 'text': return [textBoxPts(e)];
     case 'dim': return dimGeometry(e).lines;
+    case 'hatch': return e.loops.map((l) => (l.length ? [...l, l[0]] : l));
   }
 }
 
@@ -199,21 +207,24 @@ export function entityBox(e: Entity): Box {
   return b;
 }
 
-export function drawingBox(ents: Entity[]): Box {
+export function drawingBox(ents: Entity[], boxOf: (e: Entity) => Box = entityBox): Box {
   const b = emptyBox();
-  for (const e of ents) { const eb = entityBox(e); if (boxValid(eb)) { growBox(b, { x: eb.minX, y: eb.minY }); growBox(b, { x: eb.maxX, y: eb.maxY }); } }
+  for (const e of ents) { const eb = boxOf(e); if (boxValid(eb)) { growBox(b, { x: eb.minX, y: eb.minY }); growBox(b, { x: eb.maxX, y: eb.maxY }); } }
   return b;
 }
 
 /** Limites ignorando objetos muito distantes (lixo comum em DWG/DXF reais). */
-export function robustBox(ents: Entity[]): Box {
-  const full = drawingBox(ents);
+export function robustBox(ents: Entity[], boxOf: (e: Entity) => Box = entityBox): Box {
+  const full = drawingBox(ents, boxOf);
   if (ents.length < 8 || !boxValid(full)) return full;
-  const boxes = ents.map(entityBox).filter(boxValid);
-  const q = (arr: number[], p: number) => arr.sort((a, b) => a - b)[Math.floor(p * (arr.length - 1))];
-  const r = { minX: q(boxes.map((b) => b.minX), 0.02), minY: q(boxes.map((b) => b.minY), 0.02), maxX: q(boxes.map((b) => b.maxX), 0.98), maxY: q(boxes.map((b) => b.maxY), 0.98) };
+  const boxes = ents.map(boxOf).filter(boxValid);
+  // ordenação numérica nativa (Float64Array) — rápida mesmo com centenas de milhares de objetos
+  const n = boxes.length, ax = new Float64Array(n), ay = new Float64Array(n), bx = new Float64Array(n), by = new Float64Array(n);
+  for (let i = 0; i < n; i++) { const b = boxes[i]; ax[i] = b.minX; ay[i] = b.minY; bx[i] = b.maxX; by[i] = b.maxY; }
+  const q = (a: Float64Array, p: number) => a.sort()[Math.floor(p * (n - 1))];
+  const r = { minX: q(ax, 0.05), minY: q(ay, 0.05), maxX: q(bx, 0.95), maxY: q(by, 0.95) };
   const rw = Math.max(r.maxX - r.minX, 1e-9), rh = Math.max(r.maxY - r.minY, 1e-9);
-  if (full.maxX - full.minX < rw * 8 && full.maxY - full.minY < rh * 8) return full;
+  if (full.maxX - full.minX < rw * 3 && full.maxY - full.minY < rh * 3) return full;
   const m = Math.max(rw, rh);
   const out = emptyBox();
   for (const b of boxes) {

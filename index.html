@@ -84,7 +84,6 @@
 
         <div id="radial" class="radial" hidden></div>
         <div id="dropzone" class="dropzone" hidden><div><b>Solte para abrir</b><span>DWG · DXF · SVG · PLV</span></div></div>
-        <div id="busy" class="busy" hidden><div class="busy-pen"></div><b id="busy-text">Lendo…</b></div>
       </main>
 
       <!-- ============ Portal ============ -->
@@ -142,6 +141,18 @@
           <div id="help-body" class="help-body"></div>
         </form>
       </dialog>
+
+      <!-- ============ Status de abertura (fica acima de tudo, inclusive do portal) ============ -->
+      <div id="busy" class="busy" hidden role="status" aria-live="polite">
+        <div class="busy-card">
+          <div class="busy-pen"></div>
+          <b id="busy-file">arquivo</b>
+          <span id="busy-stage">Lendo…</span>
+          <div class="bar"><i id="busy-bar"></i></div>
+          <small><span id="busy-pct">0%</span> · <span id="busy-time">0,0 s</span></small>
+          <button id="busy-cancel" class="btn-line" type="button">Cancelar</button>
+        </div>
+      </div>
 
       <input id="file" type="file" hidden />
       <div id="toasts" class="toasts"></div>

@@ -2,7 +2,7 @@ import type { Drawing, Entity, Pt } from '../core/types';
 import { boxValid, dimGeometry, drawingBox, sweep, tessellate, ellipsePoint, TEXT_EM, LINE_GAP } from '../core/geom';
 import { hexToAci, inkOnLight } from '../core/aci';
 import { View } from '../render/view';
-import { pathEntity } from '../render/draw';
+import { pathEntity, fillHatch } from '../render/draw';
 
 export type Background = 'light' | 'dark' | 'transparent';
 export interface ExportOptions {
@@ -47,7 +47,7 @@ function exportPlv(d: Drawing): Blob {
 // ---------------------------------------------------------------- DXF (@tarikjabiri/dxf)
 const safeLayer = (n: string) => n.replace(/[<>/\\":;?*|=`]/g, '') || '0';
 async function exportDxf(d: Drawing, o: ExportOptions): Promise<Blob> {
-  const { DxfWriter, point3d, LWPolylineFlags, Units } = await import('@tarikjabiri/dxf');
+  const { DxfWriter, point3d, LWPolylineFlags, Units, HatchBoundaryPaths, HatchPolylineBoundary, HatchPredefinedPatterns, pattern } = await import('@tarikjabiri/dxf');
   const w = new DxfWriter();
   w.setUnits(Units.Millimeters);
   const trueColor = (hex: string) => String(parseInt(hex.slice(1), 16));
@@ -68,6 +68,17 @@ async function exportDxf(d: Drawing, o: ExportOptions): Promise<Blob> {
       case 'ellipse': w.addEllipse(point3d(e.c.x, e.c.y), point3d(e.major.x, e.major.y), e.ratio, e.start, e.start + sweep(e.start, e.end), opt); break;
       case 'poly': w.addLWPolyline(e.pts.map((p, i) => ({ point: { x: p.x, y: p.y }, bulge: e.bulges?.[i] ?? 0 })), { ...opt, flags: e.closed ? LWPolylineFlags.Closed : LWPolylineFlags.None }); break;
       case 'point': w.addPoint(e.p.x, e.p.y, 0, opt); break;
+      case 'hatch': {
+        // contornos como polilinhas fechadas; preenchimento sólido como HATCH SOLID
+        const loops = e.loops.filter((l) => l.length > 2);
+        for (const l of loops) w.addLWPolyline(l.map((p) => ({ point: p })), { ...opt, flags: LWPolylineFlags.Closed });
+        if (e.solid && loops.length) {
+          const paths = new HatchBoundaryPaths();
+          for (const l of loops) paths.addPolylineBoundary(new HatchPolylineBoundary(l.map((p) => ({ x: p.x, y: p.y }))));
+          w.addHatch(paths, pattern({ name: HatchPredefinedPatterns.SOLID }), opt);
+        }
+        break;
+      }
       case 'text': e.text.split('\n').forEach((ln, i) => {
         const dy = -i * e.h * LINE_GAP;
         w.addText(point3d(e.p.x - dy * Math.sin(e.rot), e.p.y + dy * Math.cos(e.rot)), e.h, ln, { ...opt, rotation: deg(e.rot) });
@@ -116,6 +127,7 @@ function exportSvg(d: Drawing, o: ExportOptions): Blob {
         }
         case 'text': out.push(text(e.p, e.h, e.text, e.rot, c)); break;
         case 'point': out.push(`<circle cx="${X(e.p.x)}" cy="${Y(e.p.y)}" r="${sw}" fill="${c}" stroke="none"/>`); break;
+        case 'hatch': out.push(`<path d="${e.loops.filter((l) => l.length > 2).map((l) => path(l, true)).join(' ')}" fill="${c}" fill-opacity="${e.solid ? 0.8 : 0.2}" fill-rule="evenodd" stroke="none"/>`); break;
         case 'dim': {
           const g = dimGeometry(e);
           for (const l2 of g.lines) out.push(`<path d="${path(l2)}" stroke="${c}"/>`);
@@ -148,6 +160,7 @@ function rasterize(d: Drawing, o: ExportOptions, mime: string): Promise<Blob> {
   ctx.lineWidth = Math.max(1, long / 1600);
   for (const e of ents) {
     const col = color(e);
+    if (e.type === 'hatch') { fillHatch(ctx, e, v, col); continue; }
     ctx.strokeStyle = col;
     ctx.beginPath(); pathEntity(ctx, e, v, col); ctx.stroke();
   }
@@ -180,6 +193,16 @@ async function exportPdf(d: Drawing, o: ExportOptions): Promise<Blob> {
       });
     };
     if (e.type === 'circle') { pdf.circle(X(e.c.x), Y(e.c.y), e.r * k, 'S'); continue; }
+    if (e.type === 'hatch') {
+      // sólida: preenchimento cheio; com padrão: preenchimento translúcido
+      pdf.setFillColor(c);
+      const G = (pdf as any).GState;
+      if (!e.solid && G) pdf.setGState(new G({ opacity: 0.2 }));
+      for (const l of e.loops) { if (l.length < 3) continue; pdf.moveTo(X(l[0].x), Y(l[0].y)); for (const p of l.slice(1)) pdf.lineTo(X(p.x), Y(p.y)); pdf.close(); }
+      pdf.fillEvenOdd();
+      if (!e.solid && G) pdf.setGState(new G({ opacity: 1 }));
+      continue;
+    }
     if (e.type === 'text') { textAt(e.p, e.h, e.text, e.rot); continue; }
     const paths = e.type === 'dim' ? dimGeometry(e).lines : tessellate(e, k * 4);
     for (const p of paths) {

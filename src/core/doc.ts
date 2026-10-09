@@ -28,7 +28,7 @@ export class Doc {
   constructor(d: Drawing = newDrawing()) { this.d = d; }
 
   on(fn: Listener) { this.listeners.push(fn); }
-  emit() { for (const l of this.listeners) l(); }
+  emit() { this.layerMap = null; this.idMap = null; for (const l of this.listeners) l(); }
 
   /** grava o estado atual antes de uma alteração */
   checkpoint() {
@@ -53,7 +53,12 @@ export class Doc {
     this.emit();
   }
 
-  layer(name: string): Layer | undefined { return this.d.layers.find((l) => l.name === name); }
+  /** cache nome → camada (desenhos grandes consultam isto milhares de vezes por quadro) */
+  private layerMap: Map<string, Layer> | null = null;
+  layer(name: string): Layer | undefined {
+    if (!this.layerMap) this.layerMap = new Map(this.d.layers.map((l) => [l.name, l]));
+    return this.layerMap.get(name) ?? this.d.layers.find((l) => l.name === name);
+  }
   ensureLayer(name: string, color = PALETTE[this.d.layers.length % PALETTE.length]) {
     let l = this.layer(name);
     if (!l) { l = { name, color, visible: true, locked: false }; this.d.layers.push(l); }
@@ -66,9 +71,14 @@ export class Doc {
   add(e: NewEntity): Entity {
     const ent = { ...e, id: uid() } as Entity;
     this.d.entities.push(ent);
+    this.idMap?.set(ent.id, ent);
     return ent;
   }
-  byId(id: string) { return this.d.entities.find((e) => e.id === id); }
-  remove(ids: Set<string>) { this.d.entities = this.d.entities.filter((e) => !ids.has(e.id)); }
-  replace(e: Entity) { const i = this.d.entities.findIndex((x) => x.id === e.id); if (i >= 0) this.d.entities[i] = e; }
+  private idMap: Map<string, Entity> | null = null;
+  byId(id: string) {
+    if (!this.idMap) this.idMap = new Map(this.d.entities.map((e) => [e.id, e]));
+    return this.idMap.get(id);
+  }
+  remove(ids: Set<string>) { this.d.entities = this.d.entities.filter((e) => !ids.has(e.id)); this.idMap = null; }
+  replace(e: Entity) { const i = this.d.entities.findIndex((x) => x.id === e.id); if (i >= 0) this.d.entities[i] = e; this.idMap = null; }
 }

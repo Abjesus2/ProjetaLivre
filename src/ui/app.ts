@@ -70,6 +70,8 @@ export class App {
     $('#dirty-dot').classList.toggle('on', this.ed.doc.dirty);
     clearTimeout(this.saveTimer);
     this.saveTimer = window.setTimeout(() => {
+      // desenhos enormes não cabem no armazenamento do navegador e travariam a serialização
+      if (this.ed.doc.d.entities.length > 25000) { try { localStorage.removeItem(DRAFT_KEY); } catch { /* sem armazenamento */ } return; }
       try { localStorage.setItem(DRAFT_KEY, JSON.stringify(this.ed.doc.d)); } catch { /* rascunho grande demais ou armazenamento bloqueado */ }
     }, 800);
   }
@@ -490,22 +492,55 @@ export class App {
     window.addEventListener('beforeunload', (e) => { if (this.ed.doc.dirty) { e.preventDefault(); } });
   }
 
+  private opening: AbortController | null = null;
+
   async open(file: File) {
+    if (this.opening) this.opening.abort();
+    const ctrl = (this.opening = new AbortController());
     const busy = $('#busy');
-    $('#busy-text').textContent = `Lendo ${file.name}…`;
+    const mb = file.size / 1048576;
+    $('#busy-file').textContent = `${file.name} · ${mb >= 1 ? mb.toFixed(1).replace('.', ',') + ' MB' : Math.ceil(file.size / 1024) + ' KB'}`;
+    const setStage = (stage: string, pct: number) => {
+      $('#busy-stage').textContent = stage;
+      $('#busy-bar').style.width = `${Math.max(2, Math.min(100, pct))}%`;
+      $('#busy-pct').textContent = `${Math.round(pct)}%`;
+    };
+    setStage('Preparando…', 1);
     busy.hidden = false;
     const t0 = performance.now();
+    const clock = setInterval(() => { $('#busy-time').textContent = `${((performance.now() - t0) / 1000).toFixed(1).replace('.', ',')} s`; }, 100);
+    const cancel = $('#busy-cancel');
+    cancel.onclick = () => ctrl.abort();
+    const frame = () => new Promise((r) => requestAnimationFrame(() => setTimeout(r)));
     try {
-      await new Promise((r) => setTimeout(r, 30));
-      const d = await openFile(file);
+      await frame();
+      const { drawing: d, skipped } = await openFile(file, setStage, ctrl.signal);
+      if (ctrl.signal.aborted) return;
+      setStage(`Montando o desenho… ${d.entities.length.toLocaleString('pt-BR')} objetos`, 97);
+      await frame();
       this.load(d);
       const ms = Math.round(performance.now() - t0);
-      this.toast(`${file.name} aberto`, 'ok', `${d.entities.length} objetos · ${d.layers.length} camadas · ${ms} ms`);
+      this.toast(`${file.name} aberto`, 'ok', `${d.entities.length.toLocaleString('pt-BR')} objetos · ${d.layers.length} camadas · ${(ms / 1000).toFixed(1).replace('.', ',')} s`);
       this.log(`Aberto: ${file.name} (${d.entities.length} objetos)`, 'ok');
+      // transparência: o que existe no arquivo mas ainda não é desenhado
+      const miss = Object.entries(skipped).sort((p, q) => q[1] - p[1]);
+      if (miss.length) {
+        const txt = miss.map(([t, n]) => `${n}× ${t}`).join(', ');
+        this.log(`Não exibidos: ${txt}`, 'warn');
+        setTimeout(() => this.toast('Alguns objetos do arquivo não puderam ser exibidos', 'warn', txt), 600);
+      }
+      if (d.layers.some((l) => l.name === 'Folha (layout)')) this.log('Conteúdo dos layouts (folha) colocado à direita do desenho, na camada “Folha (layout)”.', 'info');
+      const used = new Set(d.entities.map((e) => e.layer));
+      const hidden = d.layers.filter((l) => !l.visible && used.has(l.name));
+      if (hidden.length) this.log(`${hidden.length} camada(s) desligada(s)/congelada(s) no arquivo original — ative no painel Camadas para ver tudo.`, 'info');
     } catch (err) {
+      if ((err as Error).name === 'AbortError') { this.toast('Abertura cancelada', 'info'); return; }
       console.error(err);
       this.toast('Não foi possível abrir o arquivo', 'warn', (err as Error).message);
-    } finally { busy.hidden = true; }
+    } finally {
+      clearInterval(clock);
+      if (this.opening === ctrl) { this.opening = null; busy.hidden = true; }
+    }
   }
 
   load(d: Drawing) {
@@ -515,8 +550,7 @@ export class App {
     $<HTMLInputElement>('#doc-name').value = d.name;
     this.hidePortal();
     this.ed.renderer.resize();
-    this.ed.zoomExtents(false);
-    if (d.entities.length) { this.ed.view.s *= 0.6; this.ed.zoomExtents(true); }
+    this.ed.zoomExtents(true, 0.6);
     this.markDirty();
   }
 

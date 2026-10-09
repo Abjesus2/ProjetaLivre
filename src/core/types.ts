@@ -20,7 +20,11 @@ export interface PointEnt extends Base { type: 'point'; p: Pt }
 /** cota alinhada: a,b medidos; off = ponto por onde passa a linha de cota */
 export interface DimEnt extends Base { type: 'dim'; a: Pt; b: Pt; off: Pt; h?: number }
 
-export type Entity = LineEnt | CircleEnt | ArcEnt | EllipseEnt | PolyEnt | TextEnt | PointEnt | DimEnt;
+/** hachura: contornos já convertidos em pontos; pattern = linhas do padrão (ângulo, base, deslocamento) */
+export interface HatchLine { angle: number; base: Pt; offset: Pt }
+export interface HatchEnt extends Base { type: 'hatch'; loops: Pt[][]; solid: boolean; pattern?: HatchLine[]; name?: string }
+
+export type Entity = LineEnt | CircleEnt | ArcEnt | EllipseEnt | PolyEnt | TextEnt | PointEnt | DimEnt | HatchEnt;
 export type EntityType = Entity['type'];
 
 export interface Layer {
@@ -45,5 +49,5 @@ export const uid = () => (Date.now().toString(36) + (seq++).toString(36) + Math.
 
 export const TYPE_LABEL: Record<EntityType, string> = {
   line: 'Linha', circle: 'Círculo', arc: 'Arco', ellipse: 'Elipse',
-  poly: 'Polilinha', text: 'Texto', point: 'Ponto', dim: 'Cota',
+  poly: 'Polilinha', text: 'Texto', point: 'Ponto', dim: 'Cota', hatch: 'Hachura',
 };

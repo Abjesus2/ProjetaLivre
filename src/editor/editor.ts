@@ -5,6 +5,7 @@ import { View } from '../render/view';
 import { Renderer, cachedBox, type Overlay } from '../render/renderer';
 import { findSnap, type SnapSettings } from './snap';
 import { gripsOf } from './grips';
+import { GridIndex } from '../core/spatial';
 import { Tool, SelectTool, TOOLS, resolveCommand } from './tools';
 
 export type LogKind = 'info' | 'ok' | 'warn' | 'cmd';
@@ -48,9 +49,9 @@ export class Editor {
     this.renderer = new Renderer(canvas, this.view, this.doc, this.overlay);
     this.selectTool = new SelectTool(this);
     this.tool = this.selectTool;
-    this.doc.on(() => { this.renderer.dirty = true; this.pruneSelection(); this.onDocChange(); });
+    this.doc.on(() => { this.index = null; this.renderer.dirty = true; this.pruneSelection(); this.onDocChange(); });
     this.bind();
-    const loop = () => { this.refreshOverlay(); this.renderer.frame(); requestAnimationFrame(loop); };
+    const loop = () => { this.flushMove(); this.refreshOverlay(); this.renderer.frame(); requestAnimationFrame(loop); };
     requestAnimationFrame(loop);
   }
 
@@ -60,7 +61,7 @@ export class Editor {
   setSelection(ids: Iterable<string>) {
     this.selection.clear();
     for (const id of ids) this.selection.add(id);
-    this.renderer.dirty = true; this.onSelection();
+    this.onSelection(); // a seleção é desenhada por cima; não precisa redesenhar o arquivo
   }
   pruneSelection() {
     let changed = false;
@@ -91,12 +92,14 @@ export class Editor {
   undo() { if (this.doc.undo()) this.onLog('Desfeito', 'info'); else this.onLog('Nada para desfazer', 'warn'); }
   redo() { if (this.doc.redo()) this.onLog('Refeito', 'info'); else this.onLog('Nada para refazer', 'warn'); }
 
-  zoomExtents(animated = true) {
-    const b = robustBox(this.doc.d.entities.filter((e) => this.doc.isVisible(e)));
+  zoomExtents(animated = true, zoomFrom?: number) {
+    const b = robustBox(this.doc.d.entities.filter((e) => this.doc.isVisible(e)), cachedBox);
     if (!boxValid(b)) { this.view.fit(b); this.renderer.dirty = true; return; }
     if (!animated) { this.view.fit(b); this.renderer.dirty = true; return; }
-    const from = { s: this.view.s, cx: this.view.cx, cy: this.view.cy };
     const tmp = new View(); tmp.w = this.view.w; tmp.h = this.view.h; tmp.fit(b);
+    // ao abrir um arquivo: parte de um pouco mais afastado e aproxima
+    if (zoomFrom) { this.view.s = tmp.s * zoomFrom; this.view.cx = tmp.cx; this.view.cy = tmp.cy; }
+    const from = { s: this.view.s, cx: this.view.cx, cy: this.view.cy };
     const t0 = performance.now();
     const step = () => {
       const k = Math.min(1, (performance.now() - t0) / 450), e = 1 - Math.pow(1 - k, 4);
@@ -174,10 +177,17 @@ export class Editor {
   }
 
   // ---------------------------------------------------------------- consulta espacial
+  private index: GridIndex | null = null;
+  /** objetos cujas caixas podem tocar a janela (índice espacial reconstruído só quando o desenho muda) */
+  near(b: Box): Entity[] {
+    if (!this.index) this.index = new GridIndex(this.doc.d.entities, cachedBox);
+    return this.index.query(b);
+  }
+
   hit(p: Pt, filter?: (e: Entity) => boolean): Entity | null {
     const tol = 7 / this.view.s;
     let best: Entity | null = null, bd = tol;
-    const ents = this.doc.d.entities;
+    const ents = this.near({ minX: p.x - tol, minY: p.y - tol, maxX: p.x + tol, maxY: p.y + tol });
     for (let i = ents.length - 1; i >= 0; i--) {
       const e = ents[i];
       if (!this.doc.isVisible(e) || (filter && !filter(e))) continue;
@@ -191,7 +201,7 @@ export class Editor {
 
   inWindow(a: Pt, b: Pt, crossing: boolean): Entity[] {
     const box: Box = { minX: Math.min(a.x, b.x), minY: Math.min(a.y, b.y), maxX: Math.max(a.x, b.x), maxY: Math.max(a.y, b.y) };
-    return this.doc.d.entities.filter((e) => {
+    return this.near(box).filter((e) => {
       if (!this.doc.isEditable(e)) return false;
       const eb = cachedBox(e);
       const inside = eb.minX >= box.minX && eb.maxX <= box.maxX && eb.minY >= box.minY && eb.maxY <= box.maxY;
@@ -214,7 +224,8 @@ export class Editor {
     const raw = this.view.toWorld(screen.x, screen.y);
     this.rawWorld = raw;
     const exclude = this.tool.snapExclude?.();
-    const visible = this.doc.d.entities.filter((e) => this.doc.isVisible(e));
+    const t = 16 / this.view.s;
+    const visible = this.tool.wantsSnap() ? this.near({ minX: raw.x - t, minY: raw.y - t, maxX: raw.x + t, maxY: raw.y + t }).filter((e) => this.doc.isVisible(e)) : [];
     let s = this.tool.wantsSnap() ? findSnap(visible, raw, this.view.s, this.snap, exclude) : null;
     let p = s ? s.p : raw;
     const b = this.tool.base();
@@ -250,6 +261,7 @@ export class Editor {
         else this.onContextMenu(sp);
         return;
       }
+      this.pendingMove = null;
       const p = this.resolvePoint(sp);
       this.renderer.ripple(p);
       this.tool.pointerDown(p, sp, { shift: ev.shiftKey, typed: false });
@@ -268,10 +280,8 @@ export class Editor {
       }
       this.overlay.cursor = sp;
       if (this.panning) { this.view.pan(sp.x - this.panning.x, sp.y - this.panning.y); this.panning = sp; this.renderer.dirty = true; return; }
-      const p = this.resolvePoint(sp);
-      this.overlay.world = p;
-      this.onCursor(p);
-      this.tool.move(p, sp);
+      // processado uma vez por quadro (flushMove), não a cada evento do mouse
+      this.pendingMove = sp;
     });
     const endTouch = (ev: PointerEvent) => {
       this.touches.delete(ev.pointerId);
@@ -298,6 +308,17 @@ export class Editor {
       if (ev.button === 1) this.zoomExtents();
     });
     window.addEventListener('resize', () => this.renderer.resize());
+  }
+
+  private pendingMove: Pt | null = null;
+  private flushMove() {
+    const sp = this.pendingMove;
+    if (!sp) return;
+    this.pendingMove = null;
+    const p = this.resolvePoint(sp);
+    this.overlay.world = p;
+    this.onCursor(p);
+    this.tool.move(p, sp);
   }
 
   private refreshOverlay() {

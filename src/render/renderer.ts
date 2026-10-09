@@ -3,7 +3,7 @@ import type { Box } from '../core/geom';
 import { entityBox, tessellate, dist } from '../core/geom';
 import type { Doc } from '../core/doc';
 import { View } from './view';
-import { pathEntity, TEXT_FONT } from './draw';
+import { pathEntity, fillHatch, TEXT_FONT } from './draw';
 
 export type SnapKind = 'end' | 'mid' | 'center' | 'quad' | 'inter' | 'near' | 'grid';
 export interface SnapHit { p: Pt; kind: SnapKind }
@@ -27,12 +27,18 @@ interface Ripple { x: number; y: number; t0: number; color: string }
 interface Particle { x: number; y: number; vx: number; vy: number; life: number; color: string; size: number }
 
 const boxCache = new WeakMap<object, Box>();
+/** aproveita limites já calculados no worker */
+export function seedBoxes(ents: Entity[], b: Float64Array) {
+  ents.forEach((e, i) => boxCache.set(e, { minX: b[i * 4], minY: b[i * 4 + 1], maxX: b[i * 4 + 2], maxY: b[i * 4 + 3] }));
+}
 export const cachedBox = (e: Entity) => { let b = boxCache.get(e); if (!b) { b = entityBox(e); boxCache.set(e, b); } return b; };
 
 export class Renderer {
   ctx: CanvasRenderingContext2D;
+  /** camada do desenho: canvas próprio no DOM, desenhado em lotes ao longo de vários quadros */
   staticCanvas = document.createElement('canvas');
   sctx: CanvasRenderingContext2D;
+  private job: { items: [string, Entity][]; dots: Map<string, Pt[]>; i: number; chunk: number; last: number } | null = null;
   dpr = 1;
   dirty = true;
   paper = false;
@@ -45,7 +51,13 @@ export class Renderer {
   constructor(public canvas: HTMLCanvasElement, public view: View, public doc: Doc, public overlay: Overlay) {
     this.ctx = canvas.getContext('2d')!;
     this.sctx = this.staticCanvas.getContext('2d')!;
+    this.staticCanvas.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;pointer-events:none;transform-origin:0 0;';
+    this.staticCanvas.setAttribute('aria-hidden', 'true');
+    canvas.parentElement!.insertBefore(this.staticCanvas, canvas);
   }
+
+  /** desenhos grandes: sem animação de "tinta" (ela exigiria redesenhar tudo duas vezes) */
+  get heavy() { return this.doc.d.entities.length > 8000; }
 
   resize() {
     const r = this.canvas.getBoundingClientRect();
@@ -56,7 +68,7 @@ export class Renderer {
   }
 
   ripple(p: Pt, color = '#d4ff3a') { this.ripples.push({ x: p.x, y: p.y, t0: performance.now(), color }); }
-  born(id: string) { this.births.set(id, performance.now()); this.dirty = true; }
+  born(id: string) { if (this.heavy) return; this.births.set(id, performance.now()); this.dirty = true; }
   dissolve(ents: Entity[]) {
     for (const e of ents) {
       const color = this.doc.colorOf(e);
@@ -82,32 +94,75 @@ export class Renderer {
     return 0.299 * r + 0.587 * g + 0.114 * b > 200 ? '#1b1a22' : c;
   }
 
+  /** Prepara o redesenho da camada do desenho; o traçado em si acontece em lotes (drawChunk). */
   private renderStatic() {
     const ctx = this.sctx, v = this.view;
+    this.staticCanvas.style.transform = '';
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     ctx.clearRect(0, 0, v.w, v.h);
     if (this.showGrid) this.drawGrid(ctx);
     this.drawAxes(ctx);
     const wb = v.worldBox();
-    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
-    // agrupa por cor para reduzir trocas de estado
-    const groups = new Map<string, Entity[]>();
+    const items: [string, Entity][] = [];
+    const dots = new Map<string, Pt[]>();
+    const tiny = 1.2 / v.s; // objetos menores que ~1 px viram um ponto (nível de detalhe)
     for (const e of this.doc.d.entities) {
-      if (!this.doc.isVisible(e)) continue;
-      if (this.overlay.selection.has(e.id) || this.births.has(e.id)) continue;
+      if (!this.doc.isVisible(e) || this.births.has(e.id)) continue;
       const b = cachedBox(e);
       if (b.maxX < wb.minX || b.minX > wb.maxX || b.maxY < wb.minY || b.minY > wb.maxY) continue;
       const c = this.colorFor(e);
-      let g = groups.get(c); if (!g) groups.set(c, (g = [])); g.push(e);
+      if (e.type !== 'text' && b.maxX - b.minX < tiny && b.maxY - b.minY < tiny) {
+        let d = dots.get(c); if (!d) dots.set(c, (d = [])); d.push({ x: b.minX, y: b.minY });
+        continue;
+      }
+      items.push([c, e]);
     }
-    ctx.lineWidth = 1.25;
-    for (const [c, list] of groups) {
-      ctx.strokeStyle = c;
-      ctx.beginPath();
-      for (const e of list) pathEntity(ctx, e, v, c);
-      ctx.stroke();
+    // agrupa por cor para reduzir trocas de estado
+    items.sort((p, q) => (p[0] < q[0] ? -1 : p[0] > q[0] ? 1 : 0));
+    this.job = { items, dots, i: 0, chunk: this.job?.chunk ?? 6000, last: 0 };
+    this.rendered = { s: v.s, cx: v.cx, cy: v.cy, version: v.version };
+    this.drawChunk();
+  }
+
+  /** Traça um lote do desenho. O tamanho do lote se ajusta para manter a tela fluida. */
+  private drawChunk() {
+    const job = this.job!, ctx = this.sctx, v = this.view;
+    const now = performance.now();
+    if (job.last) {
+      // o custo real de rasterização aparece no intervalo entre quadros: mira ~25 ms
+      const dt = now - job.last;
+      job.chunk = Math.max(800, Math.min(40000, Math.round(job.chunk * Math.min(2, Math.max(0.4, 25 / Math.max(dt, 1))))));
+    }
+    job.last = now;
+    ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.lineWidth = 1.25;
+    const end = Math.min(job.items.length, job.i + job.chunk);
+    let color = '';
+    ctx.beginPath();
+    for (let j = job.i; j < end; j++) {
+      const [c, e] = job.items[j];
+      if (e.type === 'hatch') { if (color) ctx.stroke(); fillHatch(ctx, e, v, c); color = ''; ctx.beginPath(); continue; }
+      if (c !== color) { if (color) ctx.stroke(); ctx.strokeStyle = c; color = c; ctx.beginPath(); }
+      pathEntity(ctx, e, v, c);
+    }
+    if (color) ctx.stroke();
+    job.i = end;
+    if (job.i >= job.items.length) {
+      for (const [c, list] of job.dots) {
+        ctx.fillStyle = c;
+        for (const p of list) { const q = v.toScreen(p); ctx.fillRect(q.x, q.y, 1, 1); }
+      }
+      this.job = null;
     }
   }
+
+  /** desenhando o arquivo em lotes? (a interface pode mostrar um aviso) */
+  get drawingProgress() { return this.job ? this.job.i / Math.max(this.job.items.length, 1) : 1; }
+
+  /** vista usada no último desenho completo da camada estática */
+  private rendered = { s: 0, cx: 0, cy: 0, version: -1 };
+  private lastViewVersion = -1;
+  private lastViewChange = 0;
 
   private drawGrid(ctx: CanvasRenderingContext2D) {
     const v = this.view;
@@ -150,10 +205,22 @@ export class Renderer {
   frame() {
     const now = performance.now();
     const ctx = this.ctx, v = this.view, ov = this.overlay;
-    if (this.dirty) { this.renderStatic(); this.dirty = false; }
+    if (v.version !== this.lastViewVersion) { this.lastViewVersion = v.version; this.lastViewChange = now; }
+    // Desenho pesado + vista mudando agora (zoom/arraste): reaproveita a última imagem
+    // transformada e só redesenha tudo quando o movimento para.
+    const moving = now - this.lastViewChange < 140;
+    const fast = this.dirty && this.heavy && moving && this.rendered.version >= 0 && v.version !== this.rendered.version;
+    if (fast) {
+      // zoom/arraste em andamento: só transforma a imagem já desenhada (GPU, custo zero)
+      const o = this.rendered, k = v.s / o.s;
+      const tx = v.w / 2 - k * (v.w / 2) + (o.cx - v.cx) * v.s;
+      const ty = v.h / 2 - k * (v.h / 2) - (o.cy - v.cy) * v.s;
+      this.staticCanvas.style.transform = `matrix(${k},0,0,${k},${tx},${ty})`;
+      this.job = null;
+    } else if (this.dirty) { this.dirty = false; this.renderStatic(); }
+    else if (this.job) this.drawChunk();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-    ctx.drawImage(this.staticCanvas, 0, 0);
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     ctx.lineCap = 'round'; ctx.lineJoin = 'round';
     const t = (now - this.start) / 1000;

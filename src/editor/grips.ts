@@ -36,6 +36,7 @@ export function gripsOf(e: Entity): Grip[] {
     case 'poly':
       return e.pts.map((v, i) => ({ p: v, apply: (p: Pt) => ({ ...e, pts: e.pts.map((q, j) => (j === i ? p : q)) }) }));
     case 'text': return [{ p: e.p, apply: (p) => ({ ...e, p }) }];
+    case 'hatch': return [];
     case 'point': return [{ p: e.p, apply: (p) => ({ ...e, p }) }];
     case 'dim':
       return [
