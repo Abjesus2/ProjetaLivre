@@ -10,6 +10,7 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
+    "test": "node tests/run.mjs",
     "build:single": "tsc --noEmit && vite build --config vite.single.config.ts && node -e \"require('fs').renameSync('dist-single/index.html','dist-single/ProjetaLivre.html')\""
   },
   "dependencies": {

@@ -55,7 +55,20 @@ animações) foi escrito para este projeto, em TypeScript, sem framework.
 
 Enter ou Espaço confirma (e repete o último comando), Esc cancela, botão direito abre o menu
 radial, roda do mouse dá zoom, botão do meio (ou Alt+arrastar, ou dois dedos) move a vista.
-`F3` snap · `F7` grade · `F8` orto · `F9` snap de grade · `F1` ajuda.
+`F3` snap · `F7` grade · `F8` orto · `F9` snap de grade · `F10` modo leve · `F1` ajuda.
+
+## Desempenho e computadores fracos
+
+- Editar não refaz o desenho inteiro: só a região que mudou é redesenhada, o desfazer guarda só
+  o que mudou (não uma cópia do arquivo) e o índice espacial é atualizado aos poucos.
+- Seleções e prévias com milhares de objetos (mover, girar, escala, espelhar) são desenhadas de
+  uma vez, pela matriz da transformação, sem recriar cada objeto a cada movimento do mouse.
+- Parado, o programa quase não usa CPU: a tela só é redesenhada quando algo muda e as animações
+  de enfeite param depois de alguns segundos sem uso.
+- **Modo leve** (botão **LEVE** na barra de baixo ou `F10`): tira brilhos, animações, o desfoque
+  atrás dos painéis e a textura da tela, usa resolução 1× e mostra textos muito pequenos como
+  traços. Liga sozinho em computadores com pouca memória ou poucos núcleos, ou se a tela ficar
+  lenta enquanto você edita; a escolha feita no botão fica guardada no navegador.
 
 ## Rodar localmente
 
@@ -64,6 +77,7 @@ npm install
 npm run dev      # servidor de desenvolvimento
 npm run build    # gera o site estático em dist/
 npm run preview  # serve o dist/ para conferir
+npm test         # testes (desfazer, índice espacial, geometria)
 ```
 
 ## Publicar

@@ -1,10 +1,10 @@
 import type { Entity, NewEntity, Pt } from '../core/types';
-import { Doc } from '../core/doc';
+import { Doc, type DocChange } from '../core/doc';
 import { boxValid, dist, robustBox, distToEntity, segBoxHit, tessellate, type Box } from '../core/geom';
 import { View } from '../render/view';
 import { Renderer, cachedBox, type Overlay } from '../render/renderer';
 import { findSnap, type SnapSettings } from './snap';
-import { gripsOf } from './grips';
+import { gripPoints } from './grips';
 import { GridIndex } from '../core/spatial';
 import { Tool, SelectTool, TOOLS, resolveCommand } from './tools';
 
@@ -14,7 +14,7 @@ export class Editor {
   doc = new Doc();
   view = new View();
   overlay: Overlay = {
-    cursor: null, world: null, snap: null, selection: new Set(), hover: null, preview: [], guides: [],
+    cursor: null, world: null, snap: null, selection: new Set(), selEnts: [], hover: null, preview: [], xform: null, guides: [],
     window: null, grips: [], activeGrip: -1, showCrosshair: true, label: null,
   };
   renderer: Renderer;
@@ -49,32 +49,77 @@ export class Editor {
     this.renderer = new Renderer(canvas, this.view, this.doc, this.overlay);
     this.selectTool = new SelectTool(this);
     this.tool = this.selectTool;
-    this.doc.on(() => { this.index = null; this.renderer.dirty = true; this.pruneSelection(); this.onDocChange(); });
+    this.renderer.query = (b) => (this.index ? this.near(b) : null);
+    this.doc.on((c) => {
+      this.indexChange(c);
+      this.renderer.invalidate(c);
+      this.selCache = null;
+      this.pruneSelection(c);
+      this.onDocChange();
+    });
     this.bind();
-    const loop = () => { this.flushMove(); this.refreshOverlay(); this.renderer.frame(); requestAnimationFrame(loop); };
+    const loop = () => {
+      const t0 = performance.now();
+      // redimensionar aqui, antes de desenhar o quadro (fora do laço, o canvas seria apagado
+      // depois do desenho e o quadro sairia vazio)
+      if (this.needResize) { this.needResize = false; this.renderer.resize(); }
+      this.flushMove();
+      // a camada de cima só é recalculada quando algo mudou (entrada do usuário, desenho, seleção)
+      if (this.renderer.overlayDirty) this.refreshOverlay();
+      this.renderer.frame();
+      this.onFrame(performance.now() - t0, t0);
+      requestAnimationFrame(loop);
+    };
     requestAnimationFrame(loop);
   }
 
+  private needResize = false;
+  /** ajusta o tamanho/resolução da tela no começo do próximo quadro */
+  requestResize() { this.needResize = true; }
+  /** chamado a cada quadro com o tempo gasto nele (ms) — a interface mede a fluidez */
+  onFrame: (ms: number, t: number) => void = () => {};
+  /** houve entrada do usuário: redesenhar a camada de cima */
+  touch() { this.renderer.overlayDirty = true; this.lastInput = performance.now(); }
+  lastInput = 0;
+
   // ---------------------------------------------------------------- estado
   get selection() { return this.overlay.selection; }
-  selected(): Entity[] { return this.doc.d.entities.filter((e) => this.selection.has(e.id)); }
+  /** lista das selecionadas, na ordem do desenho; a mesma lista enquanto seleção e desenho não mudam */
+  private selCache: Entity[] | null = null;
+  selected(): Entity[] {
+    if (this.selCache) return this.selCache;
+    const n = this.doc.d.entities.length, k = this.selection.size;
+    let out: Entity[];
+    if (!k) out = [];
+    else if (k * 8 > n) out = this.doc.d.entities.filter((e) => this.selection.has(e.id));
+    else {
+      // poucas entre muitas: busca por id e põe na ordem do desenho
+      out = [];
+      for (const id of this.selection) { const e = this.doc.byId(id); if (e) out.push(e); }
+      if (out.length > 1) out.sort((a, b) => this.doc.orderOf(a) - this.doc.orderOf(b));
+    }
+    return (this.selCache = out);
+  }
   setSelection(ids: Iterable<string>) {
     this.selection.clear();
     for (const id of ids) this.selection.add(id);
+    this.selCache = null;
+    this.touch();
     this.onSelection(); // a seleção é desenhada por cima; não precisa redesenhar o arquivo
   }
-  pruneSelection() {
+  pruneSelection(c?: DocChange) {
+    if (!this.selection.size) return;
     let changed = false;
-    for (const id of this.selection) if (!this.doc.byId(id)) { this.selection.delete(id); changed = true; }
-    if (changed) this.onSelection();
+    // só as apagadas podem ter saído da seleção (exceto quando o desenho foi trocado por inteiro)
+    const ids = !c || c.reset ? [...this.selection] : c.removed.map((e) => e.id);
+    for (const id of ids) if (this.selection.has(id) && !this.doc.byId(id)) { this.selection.delete(id); changed = true; }
+    if (changed) { this.selCache = null; this.onSelection(); }
   }
 
   /** Executa uma alteração com ponto de desfazer e animações. */
   mutate(fn: () => void) {
     this.doc.checkpoint();
-    fn();
-    this.renderer.dirty = true;
-    this.doc.emit();
+    try { fn(); } finally { this.doc.commit(); this.doc.emit(); }
   }
   add(e: NewEntity): Entity {
     const ent = this.doc.add(e);
@@ -95,7 +140,7 @@ export class Editor {
   zoomExtents(animated = true, zoomFrom?: number) {
     const b = robustBox(this.doc.d.entities.filter((e) => this.doc.isVisible(e)), cachedBox);
     if (!boxValid(b)) { this.view.fit(b); this.renderer.dirty = true; return; }
-    if (!animated) { this.view.fit(b); this.renderer.dirty = true; return; }
+    if (!animated || this.renderer.lite) { this.view.fit(b); this.renderer.dirty = true; return; }
     const tmp = new View(); tmp.w = this.view.w; tmp.h = this.view.h; tmp.fit(b);
     // ao abrir um arquivo: parte de um pouco mais afastado e aproxima
     if (zoomFrom) { this.view.s = tmp.s * zoomFrom; this.view.cx = tmp.cx; this.view.cy = tmp.cy; }
@@ -114,6 +159,7 @@ export class Editor {
 
   // ---------------------------------------------------------------- ferramentas
   setTool(t: Tool | null) {
+    this.touch();
     // sair da seleção não pode limpar os objetos escolhidos (o próximo comando os usa)
     if (this.tool === this.selectTool) this.selectTool.release(); else this.tool.cancel();
     this.tool = t ?? this.selectTool;
@@ -122,7 +168,7 @@ export class Editor {
     this.tool.start();
     this.updatePrompt();
   }
-  updatePrompt() { this.onPrompt(this.tool.prompt); }
+  updatePrompt() { this.touch(); this.onPrompt(this.tool.prompt); }
   prompt(text: string) { this.tool.prompt = text; this.updatePrompt(); }
 
   runCommand(raw: string): void {
@@ -178,10 +224,31 @@ export class Editor {
 
   // ---------------------------------------------------------------- consulta espacial
   private index: GridIndex | null = null;
-  /** objetos cujas caixas podem tocar a janela (índice espacial reconstruído só quando o desenho muda) */
+  /** objetos cujas caixas podem tocar a janela (sem os já apagados) */
   near(b: Box): Entity[] {
     if (!this.index) this.index = new GridIndex(this.doc.d.entities, cachedBox);
-    return this.index.query(b);
+    const out = this.index.query(b);
+    return this.index.stale ? out.filter((e) => this.doc.byId(e.id) === e) : out;
+  }
+  /** monta o índice quando o navegador estiver ocioso (o primeiro passar do mouse não trava) */
+  private buildIndexWhenIdle() {
+    const idle = (window as Window & { requestIdleCallback?: (f: () => void, o?: { timeout: number }) => number }).requestIdleCallback;
+    const run = () => { if (!this.index && this.renderer.drawingProgress >= 1) this.near({ minX: 0, minY: 0, maxX: 0, maxY: 0 }); else if (!this.index) setTimeout(() => this.buildIndexWhenIdle(), 300); };
+    if (idle) idle(run, { timeout: 3000 }); else setTimeout(run, 500);
+  }
+  /** índice atualizado só com o que entrou/saiu (remontado de vez em quando) */
+  private indexChange(c: DocChange) {
+    const ix = this.index;
+    if (!ix) { if (c.reset) this.buildIndexWhenIdle(); return; }
+    // desenho trocado ou mudança grande: remontar sai mais barato que inserir um a um
+    if (c.reset || ix.inserted + c.added.length > Math.max(500, ix.built) || ix.stale + c.removed.length > Math.max(500, ix.built / 4)) {
+      this.index = null;
+      this.buildIndexWhenIdle();
+      return;
+    }
+    for (const e of c.added) ix.insert(e);
+    ix.stale += c.removed.length;
+    if (ix.worn) { this.index = null; this.buildIndexWhenIdle(); }
   }
 
   hit(p: Pt, filter?: (e: Entity) => boolean): Entity | null {
@@ -194,7 +261,8 @@ export class Editor {
       const b = cachedBox(e);
       if (p.x < b.minX - tol || p.x > b.maxX + tol || p.y < b.minY - tol || p.y > b.maxY + tol) continue;
       const d = distToEntity(e, p, this.view.s);
-      if (d < bd) { bd = d; best = e; }
+      // empate (geometria coincidente): fica o de cima, o desenhado por último
+      if (d < bd || (d === bd && best && this.doc.orderOf(e) > this.doc.orderOf(best))) { bd = d; best = e; }
     }
     return best;
   }
@@ -244,6 +312,7 @@ export class Editor {
     cv.addEventListener('pointerdown', (ev) => {
       cv.setPointerCapture(ev.pointerId);
       const sp = this.screenOf(ev);
+      this.touch();
       if (ev.pointerType === 'touch') {
         this.touches.set(ev.pointerId, sp);
         if (this.touches.size === 2) {
@@ -269,6 +338,7 @@ export class Editor {
     });
     cv.addEventListener('pointermove', (ev) => {
       const sp = this.screenOf(ev);
+      this.touch();
       if (this.pinch && this.touches.has(ev.pointerId)) {
         this.touches.set(ev.pointerId, sp);
         const [a, b] = [...this.touches.values()];
@@ -290,15 +360,17 @@ export class Editor {
     };
     cv.addEventListener('pointercancel', endTouch);
     cv.addEventListener('pointerup', (ev) => {
+      this.touch();
       if (ev.pointerType === 'touch' && endTouch(ev)) return;
       if (this.panning) { this.panning = null; cv.classList.remove('panning'); return; }
       if (ev.button !== 0) return;
       const sp = this.screenOf(ev);
       this.tool.pointerUp(this.resolvePoint(sp), sp);
     });
-    cv.addEventListener('pointerleave', () => { this.overlay.cursor = null; this.overlay.snap = null; });
+    cv.addEventListener('pointerleave', () => { this.overlay.cursor = null; this.overlay.snap = null; this.touch(); });
     cv.addEventListener('wheel', (ev) => {
       ev.preventDefault();
+      this.touch();
       const sp = this.screenOf(ev);
       const k = Math.exp(-ev.deltaY * (ev.ctrlKey ? 0.01 : 0.0018));
       this.view.zoomAt(sp.x, sp.y, k);
@@ -307,7 +379,10 @@ export class Editor {
     cv.addEventListener('dblclick', (ev) => {
       if (ev.button === 1) this.zoomExtents();
     });
-    window.addEventListener('resize', () => this.renderer.resize());
+    // vários eventos de redimensionar no mesmo quadro: um ajuste só, no começo do quadro
+    window.addEventListener('resize', () => this.requestResize());
+    // teclado (comandos, Esc, Enter) muda prompt e prévias
+    window.addEventListener('keydown', () => this.touch(), true);
   }
 
   private pendingMove: Pt | null = null;
@@ -324,13 +399,15 @@ export class Editor {
   private refreshOverlay() {
     const ov = this.overlay;
     ov.preview = this.tool.preview();
+    ov.xform = this.tool.xformPreview();
     ov.guides = this.tool.guides();
     ov.label = this.tool.label();
     ov.hover = this.tool.hoverId();
+    ov.selEnts = this.selection.size ? this.selected() : [];
     // grips das entidades selecionadas (até um limite)
     ov.grips = [];
     if (this.tool === this.selectTool && this.selection.size && this.selection.size <= 60) {
-      for (const e of this.selected()) for (const g of gripsOf(e)) ov.grips.push(g.p);
+      for (const e of ov.selEnts) for (const g of gripPoints(e)) ov.grips.push(g);
     }
     ov.activeGrip = this.selectTool.activeGripIndex();
   }

@@ -66,9 +66,28 @@ export function intersectPrims(p: Prim, q: Prim): Pt[] {
   return arcArc(p as any, q as any);
 }
 
+const primCache = new WeakMap<Entity, Prim[]>();
+/** primitivas da entidade, guardadas (as entidades nunca mudam no lugar) */
+export function primsOf(e: Entity): Prim[] {
+  let p = primCache.get(e);
+  if (!p) { p = entityPrims(e); primCache.set(e, p); }
+  return p;
+}
+
+/** a primitiva passa a no máximo `tol` do ponto? (interseções mais longe que isso não interessam) */
+export function primNear(q: Prim, p: Pt, tol: number): boolean {
+  if (q.k === 'arc') return Math.abs(Math.hypot(p.x - q.c.x, p.y - q.c.y) - q.r) <= tol;
+  const minX = Math.min(q.a.x, q.b.x) - tol, maxX = Math.max(q.a.x, q.b.x) + tol;
+  const minY = Math.min(q.a.y, q.b.y) - tol, maxY = Math.max(q.a.y, q.b.y) + tol;
+  if (p.x < minX || p.x > maxX || p.y < minY || p.y > maxY) return false;
+  const dx = q.b.x - q.a.x, dy = q.b.y - q.a.y, l2 = dx * dx + dy * dy;
+  const t = l2 ? Math.max(0, Math.min(1, ((p.x - q.a.x) * dx + (p.y - q.a.y) * dy) / l2)) : 0;
+  return Math.hypot(p.x - (q.a.x + t * dx), p.y - (q.a.y + t * dy)) <= tol;
+}
+
 export function intersectEntities(e1: Entity, e2: Entity): Pt[] {
   const out: Pt[] = [];
-  const P = entityPrims(e1), Q = entityPrims(e2);
+  const P = primsOf(e1), Q = primsOf(e2);
   if (P.length * Q.length > 20000) return out;
   for (const p of P) for (const q of Q) out.push(...intersectPrims(p, q));
   return out;

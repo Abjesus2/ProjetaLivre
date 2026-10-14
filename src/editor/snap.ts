@@ -1,6 +1,6 @@
 import type { Entity, Pt } from '../core/types';
 import { dist, mid, polar, ellipsePoint, sweep, closestOnSeg, tessellate, dimGeometry } from '../core/geom';
-import { intersectEntities } from './intersect';
+import { primsOf, primNear, intersectPrims } from './intersect';
 import type { SnapHit, SnapKind } from '../render/renderer';
 import { cachedBox } from '../render/renderer';
 
@@ -56,6 +56,21 @@ export function findSnap(ents: Entity[], p: Pt, scale: number, st: SnapSettings,
       const b = cachedBox(e);
       if (p.x < b.minX - tol || p.x > b.maxX + tol || p.y < b.minY - tol || p.y > b.maxY + tol) continue;
       near.push(e);
+      if (e.type === 'poly') {
+        // polilinha: direto dos vértices (sem criar um objeto por vértice a cada movimento)
+        const pts = e.pts, n = pts.length;
+        if (st.kinds.end) for (const q of pts) { const d = dist(q, p); if (d < bd) { bd = d; best = { p: q, kind: 'end' }; } }
+        if (st.kinds.mid) {
+          const segs = e.closed ? n : n - 1;
+          for (let i = 0; i < segs; i++) {
+            if (e.bulges?.[i]) continue;
+            const a = pts[i], b = pts[(i + 1) % n];
+            const d = Math.hypot((a.x + b.x) / 2 - p.x, (a.y + b.y) / 2 - p.y);
+            if (d < bd) { bd = d; best = { p: mid(a, b), kind: 'mid' }; }
+          }
+        }
+        continue;
+      }
       for (const s of snapPoints(e)) {
         if (!st.kinds[s.kind as keyof SnapSettings['kinds']]) continue;
         const d = dist(s.p, p);
@@ -63,10 +78,16 @@ export function findSnap(ents: Entity[], p: Pt, scale: number, st: SnapSettings,
       }
     }
     if (st.kinds.inter && near.length > 1 && near.length < 60) {
-      for (let i = 0; i < near.length; i++) for (let j = i + 1; j < near.length; j++) {
-        for (const q of intersectEntities(near[i], near[j])) {
-          const d = dist(q, p);
-          if (d < bd) { bd = d; best = { p: q, kind: 'inter' }; }
+      // só as partes (segmentos/arcos) que passam perto do cursor podem dar uma interseção aceitável
+      const close = near.map((e) => primsOf(e).filter((q) => primNear(q, p, tol)));
+      for (let i = 0; i < near.length; i++) {
+        if (!close[i].length) continue;
+        for (let j = i + 1; j < near.length; j++) {
+          if (!close[j].length || close[i].length * close[j].length > 20000) continue;
+          for (const a of close[i]) for (const b of close[j]) for (const q of intersectPrims(a, b)) {
+            const d = dist(q, p);
+            if (d < bd) { bd = d; best = { p: q, kind: 'inter' }; }
+          }
         }
       }
     }

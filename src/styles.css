@@ -359,6 +359,9 @@ button:focus-visible, input:focus-visible { outline: 2px dashed var(--ice); outl
   clip-path: circle(150% at 50% 50%);
 }
 .portal.gone { clip-path: circle(0% at var(--ox, 50%) var(--oy, 50%)); visibility: hidden; }
+/* portal escondido continua existindo (para a transição de volta): suas animações param, senão
+   os fundos desfocados e a faixa rolando gastam CPU o tempo todo por trás do editor */
+.portal.gone::before, .portal.gone::after, .portal.gone *, .portal.gone *::before, .portal.gone *::after { animation-play-state: paused !important; }
 .portal-bg { position: absolute; inset: -20%; pointer-events: none; }
 .portal-bg i { position: absolute; border-radius: 50%; filter: blur(80px); opacity: .55; animation: drift 14s ease-in-out infinite alternate; }
 .portal-bg i:nth-child(1) { width: 46vw; height: 46vw; background: #3b2cff; left: 8%; top: 10%; }
@@ -424,12 +427,23 @@ button:focus-visible, input:focus-visible { outline: 2px dashed var(--ice); outl
 }
 @media (max-width: 560px) {
   .dock { top: 76px; bottom: 150px; justify-content: flex-start; }
-  .toggles .knob:nth-child(n+3) { display: none; }
+  .toggles .knob:nth-child(n+3):not(.knob-lite) { display: none; }
   .island-actions .sep, .island-actions [data-act='theme'] { display: none; }
   .doc-name, .dirty-dot { display: none; }
   .island-brand { padding-right: 6px; }
   .act { min-width: 34px; padding: 0 6px; }
 }
+/* sem uso há alguns segundos: animações contínuas de enfeite param (não gastam CPU à toa) */
+html.calma .bm-ring, html.calma .bm-leg, html.calma .bm-arc, html.calma .hex.on::after, html.calma .caret, html.calma .dirty-dot.on { animation-play-state: paused; }
+
+/* ----------------------------------------------------------- modo leve
+   computadores fracos: sem desfoque atrás dos painéis (refeito a cada quadro do desenho),
+   sem a textura misturada por cima da tela inteira e sem animações contínuas */
+html.lite *, html.lite *::before, html.lite *::after { animation: none !important; transition: none !important; backdrop-filter: none !important; }
+html.lite .modal::backdrop { backdrop-filter: none !important; }
+html.lite #stage::after { display: none; }
+html.lite .knob-lite.on { background: var(--ice); border-color: var(--ice); }
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }

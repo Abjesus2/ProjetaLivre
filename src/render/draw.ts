@@ -1,11 +1,11 @@
 import type { Entity, HatchEnt, Pt } from '../core/types';
-import { dimGeometry, polySegments, sweep, TEXT_EM, LINE_GAP } from '../core/geom';
+import { dimGeometry, polySegments, sweep, textBoxPts, TEXT_EM, LINE_GAP } from '../core/geom';
 import type { View } from './view';
 
 export const TEXT_FONT = '"JetBrains Mono", ui-monospace, monospace';
 
 /** Traça o caminho de uma entidade no contexto (sem stroke). Textos são desenhados aqui mesmo. */
-export function pathEntity(ctx: CanvasRenderingContext2D, e: Entity, v: View, color: string) {
+export function pathEntity(ctx: CanvasRenderingContext2D, e: Entity, v: View, color: string, lite = false) {
   const S = (p: Pt) => v.toScreen(p);
   switch (e.type) {
     case 'line': { const a = S(e.a), b = S(e.b); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); break; }
@@ -35,11 +35,11 @@ export function pathEntity(ctx: CanvasRenderingContext2D, e: Entity, v: View, co
       break;
     }
     case 'point': { const p = S(e.p); ctx.moveTo(p.x - 4, p.y); ctx.lineTo(p.x + 4, p.y); ctx.moveTo(p.x, p.y - 4); ctx.lineTo(p.x, p.y + 4); break; }
-    case 'text': drawText(ctx, e.p, e.h, e.text, e.rot, v, color); break;
+    case 'text': drawText(ctx, e.p, e.h, e.text, e.rot, v, color, lite); break;
     case 'dim': {
       const g = dimGeometry(e);
       for (const l of g.lines) l.forEach((p, i) => { const q = S(p); if (i) ctx.lineTo(q.x, q.y); else ctx.moveTo(q.x, q.y); });
-      drawText(ctx, g.text.p, g.text.h, g.text.text, g.text.rot, v, color);
+      drawText(ctx, g.text.p, g.text.h, g.text.text, g.text.rot, v, color, lite);
       break;
     }
     case 'hatch':
@@ -99,10 +99,20 @@ export function fillHatch(ctx: CanvasRenderingContext2D, e: HatchEnt, v: View, c
   ctx.restore();
 }
 
-export function drawText(ctx: CanvasRenderingContext2D, p: Pt, h: number, text: string, rot: number, v: View, color: string) {
+/**
+ * Fonte já aplicada nos contextos preparados com resetTextFont (trocar ctx.font a cada texto é
+ * caro). Contextos não preparados (camada de cima, que usa save/restore em volta) sempre recebem
+ * a fonte.
+ */
+const fontOf = new WeakMap<CanvasRenderingContext2D, string>();
+/** começa um lote de textos: a fonte passa a ser guardada até o próximo reset */
+export function resetTextFont(ctx: CanvasRenderingContext2D) { fontOf.set(ctx, ''); }
+
+export function drawText(ctx: CanvasRenderingContext2D, p: Pt, h: number, text: string, rot: number, v: View, color: string, lite = false) {
   const px = h * v.s * TEXT_EM;
   const q = v.toScreen(p);
-  if (px < 1.5) {
+  // modo leve: texto pequeno (ilegível de qualquer jeito) vira traço mais cedo
+  if (px < (lite ? 3.5 : 1.5)) {
     // texto pequeno demais para ler: mostra só um traço no lugar (como o AutoCAD faz)
     if (px < 0.35) return;
     const w = text.split('\n')[0].length * px * 0.6;
@@ -111,13 +121,56 @@ export function drawText(ctx: CanvasRenderingContext2D, p: Pt, h: number, text: 
     ctx.restore();
     return;
   }
-  ctx.save();
-  ctx.translate(q.x, q.y);
-  ctx.rotate(-rot);
-  ctx.font = `${px}px ${TEXT_FONT}`;
+  // a fonte fica fora do save/restore para valer nos próximos textos do mesmo tamanho
+  const font = `${px}px ${TEXT_FONT}`;
+  const cached = fontOf.get(ctx);
+  if (cached === undefined) ctx.font = font;
+  else if (cached !== font) { ctx.font = font; fontOf.set(ctx, font); }
   ctx.fillStyle = color;
   ctx.textBaseline = 'alphabetic';
   const lines = text.split('\n');
+  if (!rot) { lines.forEach((ln, i) => ctx.fillText(ln, q.x, q.y + i * h * v.s * LINE_GAP)); return; }
+  ctx.save();
+  ctx.translate(q.x, q.y);
+  ctx.rotate(-rot);
   lines.forEach((ln, i) => ctx.fillText(ln, 0, i * h * v.s * LINE_GAP));
   ctx.restore();
+}
+
+/**
+ * Acrescenta a entidade a um caminho em coordenadas do mundo, relativas a (ox, oy) e com y
+ * invertido (como na tela). Usado para desenhar de uma vez, com uma matriz, seleções e prévias
+ * com muitos objetos. Textos entram como o retângulo que ocupam. `s` = escala atual (qualidade
+ * das curvas de polilinha e tamanho da cruz dos pontos).
+ */
+export function pathWorld(path: Path2D, e: Entity, ox: number, oy: number, s: number) {
+  const P = (p: Pt) => ({ x: p.x - ox, y: oy - p.y });
+  const poly = (pts: Pt[], close: boolean) => { pts.forEach((p, i) => { const q = P(p); if (i) path.lineTo(q.x, q.y); else path.moveTo(q.x, q.y); }); if (close && pts.length > 1) path.closePath(); };
+  switch (e.type) {
+    case 'line': { const a = P(e.a), b = P(e.b); path.moveTo(a.x, a.y); path.lineTo(b.x, b.y); break; }
+    case 'circle': { const c = P(e.c); path.moveTo(c.x + e.r, c.y); path.arc(c.x, c.y, e.r, 0, Math.PI * 2); break; }
+    case 'arc': {
+      const c = P(e.c), sw = sweep(e.start, e.end);
+      path.moveTo(c.x + e.r * Math.cos(-e.start), c.y + e.r * Math.sin(-e.start));
+      path.arc(c.x, c.y, e.r, -e.start, -(e.start + sw), true);
+      break;
+    }
+    case 'ellipse': {
+      const c = P(e.c), R = Math.hypot(e.major.x, e.major.y), r = Math.max(R * e.ratio, 1e-9);
+      const rot = -Math.atan2(e.major.y, e.major.x), sw = sweep(e.start, e.end);
+      const ux = R * Math.cos(-e.start), uy = r * Math.sin(-e.start);
+      path.moveTo(c.x + ux * Math.cos(rot) - uy * Math.sin(rot), c.y + ux * Math.sin(rot) + uy * Math.cos(rot));
+      path.ellipse(c.x, c.y, R, r, rot, -e.start, -(e.start + sw), true);
+      break;
+    }
+    case 'poly': {
+      const curved = e.bulges?.some((b) => b);
+      poly(curved ? polySegments(e, s) : e.pts, e.closed && !curved);
+      break;
+    }
+    case 'point': { const p = P(e.p), d = 4 / s; path.moveTo(p.x - d, p.y); path.lineTo(p.x + d, p.y); path.moveTo(p.x, p.y - d); path.lineTo(p.x, p.y + d); break; }
+    case 'text': poly(textBoxPts(e), false); break;
+    case 'dim': { const g = dimGeometry(e); for (const l of g.lines) poly(l, false); poly(textBoxPts(g.text), false); break; }
+    case 'hatch': for (const l of e.loops) poly(l, true); break;
+  }
 }

@@ -50,7 +50,9 @@ const det = (m: Mat) => m[0] * m[3] - m[1] * m[2];
 export function transformEntity<E extends Entity>(e: E, m: Mat): E {
   const k = Math.sqrt(Math.abs(det(m)));
   const flip = det(m) < 0;
-  const o: any = structuredClone(e);
+  // cópia rasa: todo campo com pontos/listas é trocado abaixo por um novo (a original não muda)
+  const o: any = { ...e };
+  if (o.type === 'poly' && o.bulges) o.bulges = o.bulges.slice();
   switch (o.type) {
     case 'line': o.a = apply(m, o.a); o.b = apply(m, o.b); break;
     case 'point': o.p = apply(m, o.p); break;
@@ -156,7 +158,19 @@ export function tessellate(e: Entity, scale = 1): Pt[][] {
 /** altura h = altura das maiúsculas (como no AutoCAD); o corpo da fonte é h / 0.72 */
 export const TEXT_EM = 1 / 0.72;
 export const LINE_GAP = 1.667;
-export function textWidth(t: { text: string; h: number }) { return Math.max(...t.text.split('\n').map((l) => l.length)) * t.h * TEXT_EM * 0.6; }
+/** largura em "em" de uma linha: monoespaçada (0,6) e caracteres largos (CJK, emoji) maiores */
+function lineEms(l: string) {
+  let w = 0;
+  for (const ch of l) {
+    const c = ch.codePointAt(0)!;
+    if (c < 0x1100) w += 0.6;
+    else if ((c >= 0x1f000 && c <= 0x1faff) || (c >= 0x2600 && c <= 0x27bf)) w += 1.25; // emoji e símbolos
+    else if ((c <= 0x115f) || (c >= 0x2e80 && c <= 0xa4cf) || (c >= 0xac00 && c <= 0xd7a3) || (c >= 0xf900 && c <= 0xfaff) || (c >= 0xfe30 && c <= 0xfe4f) || (c >= 0xff00 && c <= 0xff60) || (c >= 0xffe0 && c <= 0xffe6) || c >= 0x20000) w += 1;
+    else w += 0.6;
+  }
+  return w;
+}
+export function textWidth(t: { text: string; h: number }) { return Math.max(...t.text.split('\n').map(lineEms)) * t.h * TEXT_EM; }
 export function textBoxPts(t: { p: Pt; h: number; text: string; rot: number }): Pt[] {
   const w = textWidth(t), co = Math.cos(t.rot), si = Math.sin(t.rot);
   const below = -(t.text.split('\n').length - 1) * t.h * LINE_GAP - t.h * 0.25;
@@ -199,9 +213,41 @@ export function formatLen(v: number) {
   return String(r).replace('.', ',');
 }
 
+/** acrescenta à caixa um arco exato (anti-horário a partir de s, varrendo sw; sw < 0 = horário) */
+function growArc(b: Box, c: Pt, r: number, s: number, sw: number) {
+  if (sw < 0) { s += sw; sw = -sw; }
+  growBox(b, polar(c, r, s)); growBox(b, polar(c, r, s + sw));
+  // extremos do círculo (0°, 90°, 180°, 270°) que caem dentro da varredura
+  for (let k = 0; k < 4; k++) { const t = (k * Math.PI) / 2; if (sw >= TAU - 1e-12 || normAng(t - s) <= sw) growBox(b, polar(c, r, t)); }
+}
+
+/** Caixa exata (arcos e elipses pelos pontos extremos, não por amostras). */
 export function entityBox(e: Entity): Box {
   const b = emptyBox();
-  if (e.type === 'circle') { growBox(b, { x: e.c.x - e.r, y: e.c.y - e.r }); growBox(b, { x: e.c.x + e.r, y: e.c.y + e.r }); return b; }
+  switch (e.type) {
+    case 'circle': growBox(b, { x: e.c.x - e.r, y: e.c.y - e.r }); growBox(b, { x: e.c.x + e.r, y: e.c.y + e.r }); return b;
+    case 'arc': growArc(b, e.c, e.r, e.start, sweep(e.start, e.end)); return b;
+    case 'ellipse': {
+      const sw = sweep(e.start, e.end);
+      const nx = -e.major.y * e.ratio, ny = e.major.x * e.ratio; // semi-eixo menor
+      growBox(b, ellipsePoint(e, e.start)); growBox(b, ellipsePoint(e, e.start + sw));
+      const tx = Math.atan2(nx, e.major.x), ty = Math.atan2(ny, e.major.y);
+      for (const t of [tx, tx + Math.PI, ty, ty + Math.PI]) if (sw >= TAU - 1e-12 || normAng(t - e.start) <= sw) growBox(b, ellipsePoint(e, t));
+      return b;
+    }
+    case 'poly': {
+      const n = e.pts.length;
+      for (const p of e.pts) growBox(b, p);
+      if (e.bulges?.some((x) => x)) {
+        const segs = e.closed ? n : n - 1;
+        for (let i = 0; i < segs; i++) {
+          const p1 = e.pts[i], p2 = e.pts[(i + 1) % n], bu = e.bulges[i] ?? 0;
+          if (Math.abs(bu) > 1e-9 && dist(p1, p2) > 1e-12) { const a = bulgeArc(p1, p2, bu); growArc(b, a.c, a.r, a.start, a.sweep); }
+        }
+      }
+      return b;
+    }
+  }
   for (const path of tessellate(e)) for (const p of path) growBox(b, p);
   if (e.type === 'dim') for (const p of textBoxPts(dimGeometry(e).text)) growBox(b, p);
   return b;

@@ -14,6 +14,7 @@ const $$ = <T extends HTMLElement = HTMLElement>(sel: string, root: ParentNode =
 const h = (html: string) => { const t = document.createElement('template'); t.innerHTML = html.trim(); return t.content.firstElementChild as HTMLElement; };
 const escapeHtml = (s: string) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
 const DRAFT_KEY = 'projetalivre:rascunho';
+const LITE_KEY = 'projetalivre:leve';
 
 export class App {
   ed: Editor;
@@ -36,7 +37,74 @@ export class App {
     this.bindFiles();
     this.bindKeys();
     this.wireEditor();
+    this.initLite();
     this.ed.updatePrompt();
+  }
+
+  // ================================================================ modo leve
+  /** o usuário ainda não escolheu: o modo leve pode ligar sozinho se a tela ficar lenta */
+  private liteAuto = true;
+  private slowFrames: number[] = [];
+  private lastFrameT = 0;
+
+  private initLite() {
+    let pref: string | null = null;
+    try { pref = localStorage.getItem(LITE_KEY); } catch { /* sem armazenamento */ }
+    const nav = navigator as Navigator & { deviceMemory?: number };
+    // computador claramente fraco (pouca memória ou poucos núcleos) ou pedido de menos movimento
+    const weak = (nav.deviceMemory !== undefined && nav.deviceMemory <= 2) || (nav.hardwareConcurrency !== undefined && nav.hardwareConcurrency <= 2)
+      || window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+    this.liteAuto = pref === null;
+    if (pref === '1' || (pref === null && weak)) this.setLite(true);
+    this.ed.onFrame = (_ms, t) => this.watchFluency(t);
+    // sem uso por um tempo: as animações decorativas param (voltam no primeiro movimento)
+    let calm = 0;
+    const wake = () => {
+      if (document.documentElement.classList.contains('calma')) document.documentElement.classList.remove('calma');
+      clearTimeout(calm);
+      calm = window.setTimeout(() => document.documentElement.classList.add('calma'), 10000);
+    };
+    for (const ev of ['pointermove', 'pointerdown', 'keydown', 'wheel']) window.addEventListener(ev, wake, { passive: true, capture: true });
+    wake();
+  }
+
+  /** liga/desliga o modo leve; `user` = escolha do usuário (fica guardada e o automático para) */
+  setLite(on: boolean, user = false) {
+    const r = this.ed.renderer;
+    r.lite = on;
+    document.documentElement.classList.toggle('lite', on);
+    $('.knob[data-toggle="lite"]')?.classList.toggle('on', on);
+    // resolução muda no começo do próximo quadro (antes de desenhar, sem quadro vazio)
+    this.ed.requestResize();
+    r.dirty = true; this.ed.touch(); // nível de detalhe e efeitos mudam
+    if (user) {
+      this.liteAuto = false;
+      try { localStorage.setItem(LITE_KEY, on ? '1' : '0'); } catch { /* sem armazenamento */ }
+    }
+  }
+
+  /**
+   * Mede a fluidez enquanto o usuário mexe no desenho. Se os quadros ficarem lentos de forma
+   * contínua (mediana acima de 45 ms em 60 quadros, ou seja, menos de ~22 quadros por segundo),
+   * liga o modo leve — só uma vez e só se o usuário nunca escolheu.
+   */
+  private watchFluency(t: number) {
+    const dt = t - this.lastFrameT;
+    this.lastFrameT = t;
+    if (!this.liteAuto || this.ed.renderer.lite || document.visibilityState !== 'visible') return;
+    const r = this.ed.renderer;
+    // só quadros de interação, sem o desenho inicial em lotes atrapalhando a medida
+    if (t - this.ed.lastInput > 250 || r.drawingProgress < 1 || dt > 1000) return;
+    this.slowFrames.push(dt);
+    if (this.slowFrames.length < 60) return;
+    const sorted = [...this.slowFrames].sort((a, b) => a - b);
+    this.slowFrames = [];
+    if (sorted[30] > 45) {
+      this.setLite(true);
+      this.liteAuto = false;
+      this.toast('Modo leve ligado', 'info', 'O computador estava com dificuldade para acompanhar. Para desligar, use o botão LEVE na barra de baixo (ou F10).');
+      this.log('Modo leve ligado automaticamente', 'info');
+    }
   }
 
   // ================================================================ editor → UI
@@ -70,10 +138,16 @@ export class App {
     $('#dirty-dot').classList.toggle('on', this.ed.doc.dirty);
     clearTimeout(this.saveTimer);
     this.saveTimer = window.setTimeout(() => {
-      // desenhos enormes não cabem no armazenamento do navegador e travariam a serialização
-      if (this.ed.doc.d.entities.length > 25000) { try { localStorage.removeItem(DRAFT_KEY); } catch { /* sem armazenamento */ } return; }
-      try { localStorage.setItem(DRAFT_KEY, JSON.stringify(this.ed.doc.d)); } catch { /* rascunho grande demais ou armazenamento bloqueado */ }
-    }, 800);
+      const save = () => {
+        // desenhos enormes não cabem no armazenamento do navegador e travariam a serialização
+        // (no modo leve o limite é menor: gravar trava a tela em computador fraco)
+        if (this.ed.doc.d.entities.length > (this.ed.renderer.lite ? 8000 : 25000)) { try { localStorage.removeItem(DRAFT_KEY); } catch { /* sem armazenamento */ } return; }
+        try { localStorage.setItem(DRAFT_KEY, JSON.stringify(this.ed.doc.d)); } catch { /* rascunho grande demais ou armazenamento bloqueado */ }
+      };
+      // grava quando o navegador estiver ocioso, não no meio de uma edição
+      const idle = (window as Window & { requestIdleCallback?: (f: () => void, o?: { timeout: number }) => number }).requestIdleCallback;
+      if (idle) idle(save, { timeout: 5000 }); else save();
+    }, 1500);
   }
 
   // ================================================================ dock
@@ -140,7 +214,7 @@ export class App {
     const root = document.documentElement;
     const paper = root.dataset.theme !== 'paper';
     root.dataset.theme = paper ? 'paper' : 'ink';
-    this.ed.renderer.paper = paper; this.ed.renderer.dirty = true;
+    this.ed.renderer.paper = paper; this.ed.renderer.dirty = true; this.ed.touch();
     const b = $('[data-act="theme"]'); b.querySelector('svg')?.remove(); b.insertAdjacentHTML('afterbegin', ICONS[paper ? 'moon' : 'sun']);
     try { localStorage.setItem('projetalivre:tema', root.dataset.theme); } catch { /* sem armazenamento */ }
     this.toast(paper ? 'Modo papel' : 'Modo tinta', 'info');
@@ -167,11 +241,30 @@ export class App {
     this.renderProps();
   }
 
+  /** contagem de objetos por camada (atualizada pouco depois das edições, não a cada uma) */
+  private counts = new Map<string, number>();
+  private countTimer = 0;
+  private layerSig = '';
+  private countLayers() {
+    const counts = new Map<string, number>();
+    for (const e of this.ed.doc.d.entities) counts.set(e.layer, (counts.get(e.layer) ?? 0) + 1);
+    this.counts = counts;
+    $$<HTMLElement>('#layer-list .count').forEach((el) => { el.textContent = `${counts.get(el.dataset.layer!) ?? 0} obj.`; });
+  }
+  private scheduleCounts() {
+    clearTimeout(this.countTimer);
+    this.countTimer = window.setTimeout(() => this.countLayers(), 300);
+  }
+
   private renderLayers() {
     const doc = this.ed.doc;
     const ul = $('#layer-list');
-    const counts = new Map<string, number>();
-    for (const e of doc.d.entities) counts.set(e.layer, (counts.get(e.layer) ?? 0) + 1);
+    // mesmas camadas: só a contagem muda (sem recriar a lista a cada edição)
+    const sig = JSON.stringify([doc.d.current, doc.d.layers]);
+    if (sig === this.layerSig && ul.children.length === doc.d.layers.length) { this.scheduleCounts(); return; }
+    this.layerSig = sig;
+    if (!this.counts.size || this.counts.size > doc.d.layers.length + 50) this.countLayers(); else this.scheduleCounts();
+    const counts = this.counts;
     ul.innerHTML = '';
     doc.d.layers.forEach((l, i) => {
       const li = h(`<li class="layer${l.name === doc.d.current ? ' current' : ''}${l.visible ? '' : ' hidden-layer'}" style="animation-delay:${i * 25}ms">
@@ -180,7 +273,7 @@ export class App {
         <button class="ic${l.visible ? ' active' : ''}" data-a="vis" title="Mostrar/ocultar">${l.visible ? ICONS.eye : ICONS.eyeOff}</button>
         <button class="ic${l.locked ? ' active' : ''}" data-a="lock" title="Travar">${l.locked ? ICONS.lock : ICONS.unlock}</button>
         <button class="ic" data-a="del" title="Apagar camada" ${l.name === '0' ? 'disabled style="opacity:.25"' : ''}>${ICONS.trash}</button>
-        <span class="count">${counts.get(l.name) ?? 0} obj.</span>
+        <span class="count" data-layer="${escapeHtml(l.name)}">${counts.get(l.name) ?? 0} obj.</span>
       </li>`);
       const name = $<HTMLInputElement>('.layer-name', li);
       name.readOnly = true;
@@ -198,7 +291,8 @@ export class App {
         const old = l.name;
         this.ed.mutate(() => {
           const L = doc.layer(old)!; L.name = nv;
-          doc.d.entities = doc.d.entities.map((e) => (e.layer === old ? { ...e, layer: nv } : e));
+          // uma a uma (registrado no desfazer só o que muda, sem copiar a lista inteira)
+          for (const e of doc.d.entities.filter((x) => x.layer === old)) doc.replace({ ...e, layer: nv });
           if (doc.d.current === old) doc.d.current = nv;
         });
       });
@@ -211,10 +305,11 @@ export class App {
         if (a === 'vis') this.ed.mutate(() => { const L = doc.layer(l.name)!; L.visible = !L.visible; });
         if (a === 'lock') this.ed.mutate(() => { const L = doc.layer(l.name)!; L.locked = !L.locked; });
         if (a === 'del') {
-          const n = counts.get(l.name) ?? 0;
+          let n = 0; for (const e of doc.d.entities) if (e.layer === l.name) n++;
           if (n && !confirm(`Apagar a camada “${l.name}” e seus ${n} objeto(s)?`)) return;
           this.ed.mutate(() => {
-            doc.d.entities = doc.d.entities.filter((e) => e.layer !== l.name);
+            const gone = new Set(doc.d.entities.filter((e) => e.layer === l.name).map((e) => e.id));
+            if (gone.size) doc.remove(gone);
             doc.d.layers = doc.d.layers.filter((x) => x.name !== l.name);
             if (doc.d.current === l.name) doc.d.current = '0';
           });
@@ -373,8 +468,9 @@ export class App {
     }
     if (what === 'ortho') on = ed.ortho = !ed.ortho;
     if (what === 'showgrid') { on = ed.renderer.showGrid = !ed.renderer.showGrid; ed.renderer.dirty = true; }
+    if (what === 'lite') { on = !ed.renderer.lite; this.setLite(on, true); }
     $(`.knob[data-toggle="${what}"]`).classList.toggle('on', on);
-    const names: Record<string, string> = { osnap: 'Snap a objetos', grid: 'Snap à grade', ortho: 'Modo orto', showgrid: 'Grade visível' };
+    const names: Record<string, string> = { osnap: 'Snap a objetos', grid: 'Snap à grade', ortho: 'Modo orto', showgrid: 'Grade visível', lite: 'Modo leve' };
     this.log(`${names[what]}: ${on ? 'ligado' : 'desligado'}`, on ? 'ok' : 'info');
   }
 
@@ -411,6 +507,7 @@ export class App {
     if (ev.key === 'F7') { ev.preventDefault(); this.toggle('showgrid'); return; }
     if (ev.key === 'F8') { ev.preventDefault(); this.toggle('ortho'); return; }
     if (ev.key === 'F9') { ev.preventDefault(); this.toggle('grid'); return; }
+    if (ev.key === 'F10') { ev.preventDefault(); this.toggle('lite'); return; }
     if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); this.ed.runCommand(''); return; }
     if (ctrl || ev.altKey || ev.key.length !== 1) return;
     // digitar em qualquer lugar vai para a linha de comando (como no AutoCAD)
@@ -650,7 +747,8 @@ export class App {
       <dt>roda</dt><dd>zoom no cursor</dd><dt>botão do meio / Alt+arrastar</dt><dd>mover a vista</dd><dt>botão direito</dt><dd>Enter / menu radial</dd>
       <dt>Enter · Espaço</dt><dd>confirmar / repetir comando</dd><dt>Esc</dt><dd>cancelar</dd><dt>Del</dt><dd>apagar seleção</dd>
       <dt>Ctrl+Z / Ctrl+Y</dt><dd>desfazer / refazer</dd><dt>Ctrl+C / Ctrl+V</dt><dd>copiar / colar</dd><dt>Ctrl+S</dt><dd>salvar como…</dd>
-      <dt>F3 · F7 · F8 · F9</dt><dd>snap · grade · orto · snap de grade</dd></dl></section>`);
+      <dt>F3 · F7 · F8 · F9</dt><dd>snap · grade · orto · snap de grade</dd>
+      <dt>F10</dt><dd>modo leve (para computadores fracos)</dd></dl></section>`);
     sections.push(`<section><h3>Formatos</h3><dl>
       <dt>Abrir</dt><dd>DWG (R13–2018 via LibreDWG), DXF, SVG, PLV</dd>
       <dt>Salvar</dt><dd>${FORMATS.map((f) => f.ext.toUpperCase()).join(', ')}</dd></dl></section>`);

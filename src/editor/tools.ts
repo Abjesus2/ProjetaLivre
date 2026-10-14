@@ -1,8 +1,12 @@
 import type { Entity, NewEntity, Pt } from '../core/types';
 import { ang, dist, formatLen, mirrorAbout, rotateAbout, scaleAbout, transformEntity, translate, polyArea, type Mat } from '../core/geom';
 import type { Editor } from './editor';
-import { gripsOf } from './grips';
+import { gripAt, gripPoints } from './grips';
 import { arc3, explodeEntity, offsetEntity, regularPolygon, trimEntity } from './ops';
+import { cachedBox } from '../render/renderer';
+
+/** prévia de transformação: acima disto, os originais com a matriz (sem recriar cada objeto) */
+const BIG_PREVIEW = 300;
 
 export interface PtrInfo { shift: boolean; typed: boolean }
 const deg = (r: number) => ((r * 180) / Math.PI).toFixed(1).replace('.', ',');
@@ -23,6 +27,8 @@ export abstract class Tool {
   input(_t: string): boolean { return false; }
   base(): Pt | null { return null; }
   preview(): NewEntity[] { return []; }
+  /** prévia de transformação com muitos objetos: os originais desenhados com a matriz */
+  xformPreview(): { ents: Entity[]; m: Mat } | null { return null; }
   guides(): Pt[][] { return []; }
   label(): string | null { return null; }
   hoverId(): string | null { return null; }
@@ -52,8 +58,13 @@ export class SelectTool extends Tool {
 
   hoverId() { return this.grip ? null : this.hover; }
   wantsSnap() { return !!this.grip; }
-  snapExclude() { return new Set(this.grip ? [this.grip.id] : []); }
-  base() { if (!this.grip) return null; const e = this.ed.doc.byId(this.grip.id); return e ? gripsOf(e)[this.grip.index].p : null; }
+  private excl = { id: '', set: new Set<string>() };
+  snapExclude() {
+    const id = this.grip?.id ?? '';
+    if (this.excl.id !== id) this.excl = { id, set: new Set(id ? [id] : []) };
+    return this.excl.set;
+  }
+  base() { if (!this.grip) return null; const e = this.ed.doc.byId(this.grip.id); return e ? gripPoints(e)[this.grip.index] : null; }
 
   preview(): NewEntity[] { return this.grip?.preview ? [this.grip.preview] : []; }
 
@@ -64,9 +75,9 @@ export class SelectTool extends Tool {
     if (!this.pickOnly && ed.selection.size && ed.selection.size <= 60) {
       let flat = 0;
       for (const e of ed.selected()) {
-        const gs = gripsOf(e);
+        const gs = gripPoints(e);
         for (let k = 0; k < gs.length; k++, flat++) {
-          const q = ed.view.toScreen(gs[k].p);
+          const q = ed.view.toScreen(gs[k]);
           if (Math.hypot(q.x - screen.x, q.y - screen.y) < 9 && ed.doc.isEditable(e)) {
             this.grip = { id: e.id, index: k, preview: null };
             this.gripFlatIndex = flat;
@@ -92,7 +103,7 @@ export class SelectTool extends Tool {
     const ed = this.ed;
     if (this.grip) {
       const e = ed.doc.byId(this.grip.id);
-      if (e) this.grip.preview = gripsOf(e)[this.grip.index].apply(p);
+      if (e) this.grip.preview = gripAt(e, this.grip.index).apply(p);
       return;
     }
     if (this.downScreen) {
@@ -107,7 +118,7 @@ export class SelectTool extends Tool {
     if (this.grip) {
       // arrastar e soltar longe do grip confirma; clique simples espera o próximo clique
       const e = this.ed.doc.byId(this.grip.id);
-      if (e) { const g = this.ed.view.toScreen(gripsOf(e)[this.grip.index].p); if (Math.hypot(g.x - screen.x, g.y - screen.y) > 6) this.commitGrip(p); }
+      if (e) { const g = this.ed.view.toScreen(gripPoints(e)[this.grip.index]); if (Math.hypot(g.x - screen.x, g.y - screen.y) > 6) this.commitGrip(p); }
       return;
     }
     if (!this.downScreen) return;
@@ -136,7 +147,7 @@ export class SelectTool extends Tool {
     const e = this.ed.doc.byId(g.id);
     this.grip = null; this.gripFlatIndex = -1;
     if (e) {
-      const ne = gripsOf(e)[g.index].apply(p);
+      const ne = gripAt(e, g.index).apply(p);
       this.ed.mutate(() => this.ed.doc.replace(ne));
     }
     this.reset();
@@ -396,7 +407,34 @@ abstract class ModifyTool extends Tool {
   hoverId() { return this.picking ? this.ed.selectTool.hoverId() : null; }
   wantsSnap() { return !this.picking; }
   acceptsPoints() { return !this.picking; }
-  snapExclude() { return new Set(this.objs.map((e) => e.id)); }
+  private excl: { objs: Entity[]; set: Set<string> } | null = null;
+  snapExclude() {
+    if (this.excl?.objs !== this.objs) this.excl = { objs: this.objs, set: new Set(this.objs.map((e) => e.id)) };
+    return this.excl.set;
+  }
+  /** matriz da prévia atual (null = sem prévia) */
+  protected liveMatrix(): Mat | null { return null; }
+  /** poucos objetos: prévia exata (com letras); muitos: os originais desenhados com a matriz */
+  /**
+   * Com espelhamento, textos e cotas não seguem a matriz (o resultado mantém o texto legível,
+   * girado e do outro lado do ponto de inserção): ficam na prévia exata, o resto na matriz.
+   */
+  private split: { objs: Entity[]; plain: Entity[]; texty: Entity[] } | null = null;
+  private parts() {
+    if (this.split?.objs !== this.objs) this.split = { objs: this.objs, plain: this.objs.filter((e) => e.type !== 'text' && e.type !== 'dim'), texty: this.objs.filter((e) => e.type === 'text' || e.type === 'dim') };
+    return this.split;
+  }
+  preview(): NewEntity[] {
+    const m = this.liveMatrix();
+    if (!m) return [];
+    if (this.objs.length <= BIG_PREVIEW) return this.xform(m);
+    return m[0] * m[3] - m[1] * m[2] < 0 ? this.xform(m, this.parts().texty) : [];
+  }
+  xformPreview() {
+    const m = this.liveMatrix();
+    if (!m || this.objs.length <= BIG_PREVIEW) return null;
+    return { ents: m[0] * m[3] - m[1] * m[2] < 0 ? this.parts().plain : this.objs, m };
+  }
   enter() {
     if (this.picking) {
       this.ed.selectTool.pickOnly = false;
@@ -409,7 +447,7 @@ abstract class ModifyTool extends Tool {
     this.done();
   }
   cancel() { this.ed.selectTool.pickOnly = false; this.ed.selectTool.cancel(); }
-  protected xform(m: Mat): NewEntity[] { return this.objs.map((e) => { const { id: _i, ...r } = transformEntity(e, m); return r as NewEntity; }); }
+  protected xform(m: Mat, ents = this.objs): NewEntity[] { return ents.map((e) => { const { id: _i, ...r } = transformEntity(e, m); return r as NewEntity; }); }
   protected applyXform(m: Mat, copy: boolean) {
     const ed = this.ed;
     ed.mutate(() => {
@@ -431,7 +469,7 @@ class MoveTool extends ModifyTool {
     this.applyXform(translate(p.x - this.b.x, p.y - this.b.y), this.copy);
     if (!this.copy) this.done();
   }
-  preview() { return this.b && this.cur ? this.xform(translate(this.cur.x - this.b.x, this.cur.y - this.b.y)) : []; }
+  protected liveMatrix() { return this.b && this.cur ? translate(this.cur.x - this.b.x, this.cur.y - this.b.y) : null; }
   guides() { return this.b && this.cur ? [[this.b, this.cur]] : []; }
   label() { return this.b && this.cur ? `Δ ${formatLen(dist(this.b, this.cur))}` : null; }
 }
@@ -448,7 +486,7 @@ class RotateTool extends ModifyTool {
   }
   apply(a: number) { if (!this.c) return; this.applyXform(rotateAbout(this.c, a), false); this.done(); }
   input(t: string) { if (!this.c) return false; const v = num(t); if (v == null) return false; this.apply((v * Math.PI) / 180); return true; }
-  preview() { return this.c && this.cur ? this.xform(rotateAbout(this.c, ang(this.c, this.cur))) : []; }
+  protected liveMatrix() { return this.c && this.cur ? rotateAbout(this.c, ang(this.c, this.cur)) : null; }
   guides() { return this.c && this.cur ? [[this.c, this.cur]] : []; }
   label() { return this.c && this.cur ? `${deg(ang(this.c, this.cur))}°` : null; }
 }
@@ -467,7 +505,7 @@ class ScaleTool extends ModifyTool {
   apply(k: number) { if (!this.c || k <= 0) return; this.applyXform(scaleAbout(this.c, k), false); this.done(); }
   input(t: string) { if (!this.c) return false; const v = num(t); if (v == null) return false; this.apply(v); return true; }
   factor() { return this.c && this.cur && this.ref ? dist(this.c, this.cur) / this.ref : null; }
-  preview() { const k = this.factor(); return k && this.c ? this.xform(scaleAbout(this.c, k)) : []; }
+  protected liveMatrix() { const k = this.factor(); return k && this.c ? scaleAbout(this.c, k) : null; }
   label() { const k = this.factor(); return k ? `× ${formatLen(k)}` : null; }
 }
 
@@ -484,7 +522,7 @@ class MirrorTool extends ModifyTool {
     this.applyXform(mirrorAbout(this.a, p), this.keep);
     this.done();
   }
-  preview() { return this.a && this.cur && dist(this.a, this.cur) > 1e-12 ? this.xform(mirrorAbout(this.a, this.cur)) : []; }
+  protected liveMatrix() { return this.a && this.cur && dist(this.a, this.cur) > 1e-12 ? mirrorAbout(this.a, this.cur) : null; }
   guides() { return this.a && this.cur ? [[this.a, this.cur]] : []; }
 }
 
@@ -498,10 +536,11 @@ class ExplodeTool extends ModifyTool {
   afterPick() {
     const ed = this.ed; let n = 0;
     ed.mutate(() => {
-      for (const e of this.objs) {
-        const parts = explodeEntity(e); if (!parts) continue;
-        ed.doc.remove(new Set([e.id])); parts.forEach((p) => ed.add(p)); n++;
-      }
+      // apaga todos de uma vez (o resultado é o mesmo de apagar um a um: as partes vão para o fim)
+      const all: NewEntity[][] = [], gone = new Set<string>();
+      for (const e of this.objs) { const parts = explodeEntity(e); if (!parts) continue; gone.add(e.id); all.push(parts); n++; }
+      if (gone.size) ed.doc.remove(gone);
+      for (const parts of all) parts.forEach((p) => ed.add(p));
     });
     ed.setSelection([]);
     ed.onLog(n ? `${n} objeto(s) explodido(s)` : 'Nada para explodir (use em polilinhas e cotas)', n ? 'ok' : 'warn');
@@ -561,7 +600,9 @@ class TrimTool extends Tool {
   click(p: Pt) {
     const ed = this.ed;
     const e = ed.hit(p, (x) => ed.doc.isEditable(x)); if (!e) return;
-    const cutters = ed.doc.d.entities.filter((x) => ed.doc.isVisible(x));
+    // só o que pode cruzar o objeto (caixas que se tocam), não o desenho inteiro
+    const b = cachedBox(e), m = Math.max(b.maxX - b.minX, b.maxY - b.minY, 1e-9) * 1e-6 + 1e-9;
+    const cutters = ed.near({ minX: b.minX - m, minY: b.minY - m, maxX: b.maxX + m, maxY: b.maxY + m }).filter((x) => ed.doc.isVisible(x));
     const parts = trimEntity(e, p, cutters);
     if (!parts) { ed.onLog('Nenhuma interseção para aparar aqui', 'warn'); return; }
     ed.renderer.dissolve([e]);

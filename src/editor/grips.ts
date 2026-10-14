@@ -47,3 +47,18 @@ export function gripsOf(e: Entity): Grip[] {
   }
 }
 
+
+const pointCache = new WeakMap<Entity, Pt[]>();
+/** só as posições dos grips (guardadas; polilinha = os próprios vértices, sem criar nada) */
+export function gripPoints(e: Entity): Pt[] {
+  if (e.type === 'poly') return e.pts;
+  let p = pointCache.get(e);
+  if (!p) { p = gripsOf(e).map((g) => g.p); pointCache.set(e, p); }
+  return p;
+}
+
+/** um grip só (polilinhas grandes: não cria um grip para cada vértice) */
+export function gripAt(e: Entity, i: number): Grip {
+  if (e.type === 'poly') return { p: e.pts[i], apply: (p: Pt) => ({ ...e, pts: e.pts.map((q, j) => (j === i ? p : q)) }) };
+  return gripsOf(e)[i];
+}

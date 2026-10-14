@@ -1,6 +1,6 @@
 import type { Entity, NewEntity, Pt } from '../core/types';
 import { add, ang, bulgeArc, closestOnSeg, dimGeometry, dist, mul, normAng, polar, sub, sweep, TAU } from '../core/geom';
-import { entityPrims, intersectPrims } from './intersect';
+import { primsOf, intersectPrims } from './intersect';
 
 const strip = <T extends Entity>(e: T): Omit<T, 'id'> => { const { id: _id, ...rest } = e; return rest; };
 
@@ -54,11 +54,11 @@ export function offsetEntity(e: Entity, d: number, side: Pt): NewEntity | null {
 
 // ---------------------------------------------------------------- aparar (trim)
 function cutsOn(target: Entity, cutters: Entity[]): Pt[] {
-  const tp = entityPrims(target);
+  const tp = primsOf(target);
   const out: Pt[] = [];
   for (const c of cutters) {
     if (c.id === target.id) continue;
-    for (const q of entityPrims(c)) for (const p of tp) out.push(...intersectPrims(p, q));
+    for (const q of primsOf(c)) for (const p of tp) out.push(...intersectPrims(p, q));
   }
   return out;
 }
