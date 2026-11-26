@@ -108,15 +108,60 @@
               <b>Abrir arquivo</b>
               <small>DWG, DXF, SVG ou PLV — ou arraste aqui</small>
             </button>
-            <button class="ticket" data-start="demo">
+            <button class="ticket ticket-view" data-start="view">
               <span class="ticket-no">03</span>
+              <b>Só visualizar</b>
+              <small>DWG ou DXF leve e rápido, sem edição — ideal para máquinas fracas</small>
+            </button>
+            <button class="ticket" data-start="demo">
+              <span class="ticket-no">04</span>
               <b>Ver exemplo</b>
               <small>Uma planta baixa pronta para mexer</small>
             </button>
           </div>
-          <p class="credits">Leitura de DWG por <a href="https://github.com/mlightcad/libredwg-web" target="_blank" rel="noopener">libredwg-web</a> (LibreDWG) · DXF por <a href="https://github.com/gdsestimating/dxf-parser" target="_blank" rel="noopener">dxf-parser</a> e <a href="https://github.com/dxfjs/writer" target="_blank" rel="noopener">dxfjs</a> · PDF por <a href="https://github.com/parallax/jsPDF" target="_blank" rel="noopener">jsPDF</a></p>
+          <p class="credits">Leitura de DWG e DXF e visualizador por <a href="https://github.com/storytold/cadcraft" target="_blank" rel="noopener">CADCraft</a> (com <a href="https://github.com/storytold/craft-libs" target="_blank" rel="noopener">craft-libs</a> e acadrust) · leitores alternativos <a href="https://github.com/mlightcad/libredwg-web" target="_blank" rel="noopener">libredwg-web</a> (LibreDWG) e <a href="https://github.com/gdsestimating/dxf-parser" target="_blank" rel="noopener">dxf-parser</a> · gravação de DXF por <a href="https://github.com/dxfjs/writer" target="_blank" rel="noopener">dxfjs</a> · PDF por <a href="https://github.com/parallax/jsPDF" target="_blank" rel="noopener">jsPDF</a></p>
         </div>
         <div class="ribbon" aria-hidden="true"><div class="ribbon-track"></div></div>
+      </section>
+
+      <!-- ============ Só visualização (CADCraft + placa de vídeo) ============ -->
+      <section id="viewer" class="viewer" hidden aria-label="Visualizador de desenho (somente leitura)">
+        <div class="vw-stage" tabindex="0" aria-label="Desenho: arraste para mover, role ou use dois dedos para aproximar">
+          <canvas class="vw-cv"></canvas>
+        </div>
+        <header class="island vw-top">
+          <button class="act" data-vw="back" title="Voltar ao portal" aria-label="Voltar ao portal"></button>
+          <div class="vw-title">
+            <b class="vw-name">arquivo</b>
+            <small class="vw-meta"></small>
+          </div>
+          <span class="vw-badge" title="Neste modo nada é alterado">só leitura</span>
+        </header>
+        <div class="island vw-tools" role="toolbar" aria-label="Visualização">
+          <select class="vw-sheet" aria-label="Modelo ou folha" hidden></select>
+          <button class="act" data-vw="fit" title="Enquadrar tudo (Z)" aria-label="Enquadrar tudo"></button>
+          <button class="act" data-vw="out" title="Afastar (−)" aria-label="Afastar"></button>
+          <button class="act" data-vw="in" title="Aproximar (+)" aria-label="Aproximar"></button>
+          <button class="act" data-vw="layers" title="Camadas (C)" aria-label="Camadas"></button>
+          <button class="act" data-vw="theme" title="Fundo claro / escuro" aria-label="Fundo claro ou escuro"></button>
+          <button class="act act-hot" data-vw="edit" title="Abrir este arquivo no editor"><span>Editar</span></button>
+        </div>
+        <aside class="vw-layers" hidden aria-label="Camadas">
+          <div class="card-head">
+            <h2>Camadas</h2>
+            <button class="mini" data-vw="close-layers" title="Fechar" aria-label="Fechar camadas"></button>
+          </div>
+          <div class="vw-layer-acts">
+            <button type="button" class="btn-line" data-vw="all">Todas</button>
+            <button type="button" class="btn-line" data-vw="none">Nenhuma</button>
+            <button type="button" class="btn-line" data-vw="file">Como no arquivo</button>
+          </div>
+          <ul class="vw-layer-list"></ul>
+        </aside>
+        <footer class="vw-status">
+          <output class="vw-coords"></output>
+          <span class="vw-note" aria-live="polite"></span>
+        </footer>
       </section>
 
       <!-- ============ Exportar ============ -->

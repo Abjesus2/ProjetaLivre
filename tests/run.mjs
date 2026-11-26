@@ -8,7 +8,10 @@ import { fileURLToPath } from 'node:url';
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const out = join(root, 'tests', '.build');
 mkdirSync(out, { recursive: true });
-const bundles = { doc: 'src/core/doc.ts', spatial: 'src/core/spatial.ts', geom: 'src/core/geom.ts', ops: 'src/editor/ops.ts' };
+const bundles = {
+  doc: 'src/core/doc.ts', spatial: 'src/core/spatial.ts', geom: 'src/core/geom.ts', ops: 'src/editor/ops.ts',
+  bridge: 'src/io/cadcraft/bridge.ts', format: 'src/viewer/format.ts', raw: 'src/io/raw.ts',
+};
 for (const [name, src] of Object.entries(bundles)) {
   execFileSync(process.execPath, [join(root, 'node_modules', 'rolldown', 'bin', 'cli.mjs'), join(root, src), '--format', 'esm', '--file', join(out, `${name}.mjs`)], { stdio: 'pipe' });
 }

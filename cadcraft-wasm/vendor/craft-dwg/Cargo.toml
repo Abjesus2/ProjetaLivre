@@ -1,0 +1,17 @@
+# Cópia do craft-dwg (storytold/craft-libs, rev 453b0da, MIT OR Apache-2.0) com uma única mudança:
+# o leitor de DWG (acadrust) também é compilado para WebAssembly, rodando no próprio processo
+# (no ProjetaLivre a leitura acontece num Web Worker; se o arquivo derrubar a leitura, só o
+# worker cai). Ver build.rs.
+[package]
+name = "craft-dwg"
+description = "Bounded DWG↔DXF byte bridge with an optional child-process worker"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.95"
+repository = "https://github.com/storytold/craft-libs"
+
+[target.'cfg(not(all(target_os = "freebsd", target_arch = "aarch64")))'.dependencies]
+# sem o recurso "parallel" (rayon): no navegador não há threads
+acadrust = { version = "=0.6.6", default-features = false }
+log = "0.4"

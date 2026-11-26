@@ -359,6 +359,8 @@ button:focus-visible, input:focus-visible { outline: 2px dashed var(--ice); outl
   clip-path: circle(150% at 50% 50%);
 }
 .portal.gone { clip-path: circle(0% at var(--ox, 50%) var(--oy, 50%)); visibility: hidden; }
+/* ao voltar, aparece na hora (a espera de 1 s vale só para sumir depois da animação) */
+.portal:not(.gone) { transition: clip-path 1s var(--out), visibility 0s; }
 /* portal escondido continua existindo (para a transição de volta): suas animações param, senão
    os fundos desfocados e a faixa rolando gastam CPU o tempo todo por trás do editor */
 .portal.gone::before, .portal.gone::after, .portal.gone *, .portal.gone *::before, .portal.gone *::after { animation-play-state: paused !important; }
@@ -385,7 +387,7 @@ button:focus-visible, input:focus-visible { outline: 2px dashed var(--ice); outl
 @keyframes draw { to { stroke-dashoffset: 0; } }
 @keyframes fillIn { to { fill: var(--fill); } }
 @keyframes pen { 0% { offset-distance: 0%; opacity: 1; } 95% { opacity: 1; } 100% { offset-distance: 100%; opacity: 0; } }
-.tickets { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; margin-top: 14px; perspective: 1000px; }
+.tickets { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 18px; margin-top: 14px; perspective: 1000px; }
 .ticket {
   position: relative; text-align: left; padding: 22px 22px 24px; min-height: 170px; border: 2px solid #e9f0ff; background: #15141b; color: #e9f0ff;
   border-radius: 6px 26px 6px 26px; display: flex; flex-direction: column; gap: 8px; justify-content: flex-end;
@@ -410,9 +412,58 @@ button:focus-visible, input:focus-visible { outline: 2px dashed var(--ice); outl
 .ribbon-track span:nth-child(2n) { color: #e9f0ff; }
 @keyframes marquee { to { transform: translateX(-50%); } }
 
+/* ----------------------------------------------------------- só visualização
+   uma tela à parte, sem o editor: imagem pela placa de vídeo e controles mínimos */
+.viewer { position: absolute; inset: 0; z-index: 70; background: var(--ink); overflow: hidden; }
+.vw-stage { position: absolute; inset: 0; touch-action: none; cursor: grab; outline: none; }
+.vw-stage.grabbing { cursor: grabbing; }
+.vw-stage:focus-visible { outline: 2px dashed var(--ice); outline-offset: -4px; }
+.vw-cv { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.vw-top { top: 14px; left: 14px; max-width: calc(100% - 28px - 420px); min-width: 0; padding-right: 12px; }
+.vw-title { display: grid; min-width: 0; line-height: 1.25; }
+.vw-name { font: 700 14px var(--display); letter-spacing: -.02em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.vw-meta { font: 11px var(--mono); color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.vw-badge { flex-shrink: 0; font: 700 10px var(--mono); text-transform: uppercase; letter-spacing: .08em; padding: 4px 8px; border-radius: 999px; background: var(--ice); color: #0d0c10; }
+.vw-tools { top: 14px; right: 14px; }
+.vw-tools .act.on { background: var(--ink-3); border-color: var(--lime); }
+.vw-sheet { font: 500 12px var(--mono); color: var(--paper); background: var(--ink-3); border: 1.5px solid var(--line); border-radius: 10px; height: 34px; padding: 0 6px; max-width: 170px; }
+.vw-layers {
+  position: absolute; z-index: 6; right: 14px; top: 76px; bottom: 56px; width: 290px; display: flex; flex-direction: column; gap: 10px; padding: 14px;
+  background: var(--glass); backdrop-filter: blur(14px) saturate(1.4); border: 1.5px solid var(--line); border-radius: 18px 4px 18px 18px; box-shadow: var(--shadow-2);
+}
+.vw-layers .card-head { margin: 0; }
+.vw-layers h2 { margin: 0; font: 900 18px var(--display); letter-spacing: -.03em; }
+.vw-layer-acts { display: flex; gap: 6px; flex-wrap: wrap; }
+.vw-layer-acts .btn-line { padding: 5px 9px; }
+.vw-layer-list { list-style: none; margin: 0; padding: 0; overflow: auto; flex: 1; min-height: 0; }
+.vw-layer-list label { display: flex; align-items: center; gap: 8px; padding: 7px 6px; border-radius: 8px; cursor: pointer; font: 13px var(--ui); }
+.vw-layer-list label:hover { background: var(--ink-3); }
+.vw-layer-list input { accent-color: var(--lime); width: 16px; height: 16px; margin: 0; flex-shrink: 0; }
+.vw-layer-list i { width: 12px; height: 12px; border-radius: 3px; background: var(--c); flex-shrink: 0; box-shadow: 0 0 0 1.5px var(--line); }
+.vw-layer-list span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vw-layer-list small { font: 10px var(--mono); color: var(--muted); white-space: nowrap; }
+.vw-empty { font: 12px var(--mono); color: var(--muted); padding: 8px 4px; }
+.vw-status { position: absolute; z-index: 5; left: 14px; right: 14px; bottom: 12px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; pointer-events: none; font: 12px var(--mono); color: var(--muted); }
+.vw-status > * { background: var(--glass); padding: 4px 10px; border-radius: 999px; border: 1.5px solid var(--line); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vw-status > :empty { display: none; }
+.vw-note { color: var(--lime); }
+.ticket-view { border-color: #8be9ff; box-shadow: 6px 6px 0 #8be9ff; }
+.ticket-view:hover { box-shadow: 12px 12px 0 #8be9ff; }
+.ticket:nth-child(4) { --i: 3; rotate: 1.5deg; } .ticket:nth-child(5) { --i: 4; rotate: -1.5deg; }
+
 /* ----------------------------------------------------------- responsivo */
+@media (max-width: 1060px) {
+  .vw-top { max-width: calc(100% - 28px); }
+  .vw-tools { top: auto; right: auto; left: 50%; bottom: 14px; translate: -50% 0; }
+  .vw-status { bottom: 72px; }
+  .vw-layers { top: 76px; bottom: 72px; }
+}
 @media (max-width: 860px) {
-  .tickets { grid-template-columns: 1fr; }
+  .tickets { grid-template-columns: 1fr !important; }
+  .ticket { min-height: 0; padding-top: 46px; }
+  /* a faixa vai para o fim da página (fixa embaixo, cobriria os bilhetes ao rolar) */
+  .portal-inner { padding-bottom: 28px; }
+  .ribbon { position: relative; left: auto; right: auto; bottom: auto; width: 112%; justify-self: center; margin: 0 0 40px; }
   .title text { font-size: 150px; }
   .inspector { width: 250px; }
   .inspector:not(.pinned) { transform: translateX(calc(100% - 30px)); }
@@ -426,6 +477,15 @@ button:focus-visible, input:focus-visible { outline: 2px dashed var(--ice); outl
   .prompt { display: none; }
 }
 @media (max-width: 560px) {
+  .vw-top { top: 10px; left: 10px; max-width: calc(100% - 20px); }
+  .vw-meta { font-size: 10px; }
+  .vw-badge { display: none; }
+  .vw-tools { bottom: max(10px, env(safe-area-inset-bottom)); gap: 2px; padding: 5px 6px; max-width: calc(100% - 20px); }
+  .vw-tools .act { min-width: 36px; padding: 0 5px; }
+  .vw-tools .act span { display: none; }
+  .vw-sheet { max-width: 92px; }
+  .vw-status { left: 10px; right: 10px; bottom: 66px; }
+  .vw-layers { left: 10px; right: 10px; width: auto; top: auto; bottom: 66px; max-height: 58vh; border-radius: 18px; }
   .dock { top: 76px; bottom: 150px; justify-content: flex-start; }
   .toggles .knob:nth-child(n+3):not(.knob-lite) { display: none; }
   .island-actions .sep, .island-actions [data-act='theme'] { display: none; }

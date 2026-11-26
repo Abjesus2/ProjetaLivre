@@ -59,6 +59,8 @@ export class Editor {
     });
     this.bind();
     const loop = () => {
+      // pausado (tela de só visualização aberta): nenhum quadro é calculado
+      if (this.paused) { this.looping = false; return; }
       const t0 = performance.now();
       // redimensionar aqui, antes de desenhar o quadro (fora do laço, o canvas seria apagado
       // depois do desenho e o quadro sairia vazio)
@@ -70,7 +72,22 @@ export class Editor {
       this.onFrame(performance.now() - t0, t0);
       requestAnimationFrame(loop);
     };
+    this.loop = loop;
+    this.looping = true;
     requestAnimationFrame(loop);
+  }
+
+  private loop: () => void = () => {};
+  private looping = false;
+  private paused = false;
+  /** para o laço de quadros (outra tela por cima ocupa o lugar do editor) */
+  pause() { this.paused = true; }
+  /** volta a desenhar */
+  resume() {
+    this.paused = false;
+    this.renderer.dirty = true;
+    this.requestResize();
+    if (!this.looping) { this.looping = true; requestAnimationFrame(this.loop); }
   }
 
   private needResize = false;

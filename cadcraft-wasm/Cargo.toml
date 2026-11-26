@@ -1,0 +1,40 @@
+[package]
+name = "projetalivre-cadcraft"
+description = "Ponte do ProjetaLivre para o leitor e o renderizador do CADCraft (WebAssembly)"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+cadcraft-io = { git = "https://github.com/storytold/cadcraft", rev = "0d4b100209990e485891d85c70ff465c8e709156" }
+cadcraft-doc = { git = "https://github.com/storytold/cadcraft", rev = "0d4b100209990e485891d85c70ff465c8e709156" }
+cadcraft-render = { git = "https://github.com/storytold/cadcraft", rev = "0d4b100209990e485891d85c70ff465c8e709156" }
+cadcraft-geom = { git = "https://github.com/storytold/cadcraft", rev = "0d4b100209990e485891d85c70ff465c8e709156" }
+cadcraft-color = { git = "https://github.com/storytold/cadcraft", rev = "0d4b100209990e485891d85c70ff465c8e709156" }
+ryu = "1"
+craft-dwg = { git = "https://github.com/storytold/craft-libs", rev = "453b0da782ccef39be9a6dac8d27c80b553ef1cc" }
+
+[patch."https://github.com/storytold/craft-libs"]
+craft-dwg = { path = "vendor/craft-dwg" }
+
+# os mesmos remendos da raiz do CADCraft (o Cargo ignora os remendos de dependências)
+[patch.crates-io]
+web-time = { path = "vendor/web-time" }
+krilla = { version = "=0.8.2", git = "https://github.com/storytold/craft-libs", rev = "453b0da782ccef39be9a6dac8d27c80b553ef1cc" }
+hayro-syntax = { git = "https://github.com/storytold/craft-libs", rev = "453b0da782ccef39be9a6dac8d27c80b553ef1cc" }
+hayro-jbig2 = { git = "https://github.com/storytold/craft-libs", rev = "453b0da782ccef39be9a6dac8d27c80b553ef1cc" }
+hayro-interpret = { git = "https://github.com/storytold/craft-libs", rev = "453b0da782ccef39be9a6dac8d27c80b553ef1cc" }
+hayro-cmap = { git = "https://github.com/storytold/craft-libs", rev = "453b0da782ccef39be9a6dac8d27c80b553ef1cc" }
+hayro-postscript = { git = "https://github.com/storytold/craft-libs", rev = "453b0da782ccef39be9a6dac8d27c80b553ef1cc" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+debug = false
+strip = true

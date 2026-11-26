@@ -3,6 +3,7 @@ import { uid } from '../core/types';
 import { newDrawing } from '../core/doc';
 import { createParseWorker } from './workerFactory';
 import { seedBoxes } from '../render/renderer';
+import { cadcraftModule } from './cadcraft/module';
 
 const TEXT_EM_SVG = 1 / 0.72;
 export const OPEN_ACCEPT = '.dwg,.dxf,.svg,.plv,.json';
@@ -23,7 +24,11 @@ export async function openFile(file: File, progress: Progress = () => {}, signal
 }
 
 /** Lê DWG/DXF num Web Worker: a interface continua respondendo e o usuário pode cancelar. */
-function readInWorker(kind: 'dxf' | 'dwg', data: ArrayBuffer, name: string, progress: Progress, signal?: AbortSignal): Promise<Opened> {
+async function readInWorker(kind: 'dxf' | 'dwg', data: ArrayBuffer, name: string, progress: Progress, signal?: AbortSignal): Promise<Opened> {
+  progress('Carregando o leitor CADCraft…', 4);
+  // sem o CADCraft (navegador antigo, falha de rede), o worker usa os leitores anteriores
+  const module = await cadcraftModule().catch((err) => { console.warn('CADCraft indisponível:', err); return null; });
+  if (signal?.aborted) throw new DOMException('Leitura cancelada', 'AbortError');
   return new Promise((resolve, reject) => {
     const w = createParseWorker();
     const finish = () => { w.terminate(); signal?.removeEventListener('abort', onAbort); };
@@ -41,7 +46,12 @@ function readInWorker(kind: 'dxf' | 'dwg', data: ArrayBuffer, name: string, prog
       else if (m.type === 'error') { finish(); reject(new Error(m.message)); }
     };
     w.onerror = (ev) => { finish(); reject(new Error(ev.message || 'Falha no leitor de arquivos')); };
-    w.postMessage({ kind, data, name }, [data]);
+    try {
+      w.postMessage({ op: 'edit', kind, data, name, module }, [data]);
+    } catch {
+      // navegador que não envia módulos WebAssembly a workers: leitores anteriores
+      w.postMessage({ op: 'edit', kind, data, name, module: null }, [data]);
+    }
   });
 }
 

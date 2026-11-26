@@ -4,3 +4,6 @@ dist
 .DS_Store
 dist-single
 tests/.build
+
+# compilação do leitor CADCraft (WebAssembly)
+cadcraft-wasm/target

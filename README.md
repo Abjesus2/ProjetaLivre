@@ -10,9 +10,10 @@ Antes de escrever o editor, pesquisei projetos abertos que reproduzem funções 
 
 | Projeto | O que é | Como entrou no ProjetaLivre |
 |---|---|---|
-| [LibreDWG](https://www.gnu.org/software/libredwg/) / [libredwg-web](https://github.com/mlightcad/libredwg-web) | Leitor de DWG (GNU) compilado para WebAssembly | **Abrir DWG** (R13–2018), direto no navegador |
+| [CADCraft](https://github.com/storytold/cadcraft) (+ [craft-libs](https://github.com/storytold/craft-libs), acadrust) | CAD 2D em Rust: leitor de DWG/DXF e renderizador | **Abrir DWG e DXF** e o modo **Só visualizar**, compilados para WebAssembly (pasta `cadcraft-wasm/`) |
+| [LibreDWG](https://www.gnu.org/software/libredwg/) / [libredwg-web](https://github.com/mlightcad/libredwg-web) | Leitor de DWG (GNU) compilado para WebAssembly | Leitor **reserva** de DWG (só se o CADCraft falhar; fica fora do HTML de arquivo único) |
 | [mlightcad/cad-viewer](https://github.com/mlightcad/cad-viewer) | Visualizador/editor DWG/DXF web (Vue + THREE.js) | Referência de arquitetura: tudo no cliente, sem backend |
-| [dxf-parser](https://github.com/gdsestimating/dxf-parser) | Leitor de DXF em JavaScript | **Abrir DXF** |
+| [dxf-parser](https://github.com/gdsestimating/dxf-parser) | Leitor de DXF em JavaScript | Leitor **reserva** de DXF (só se o CADCraft falhar) |
 | [dxfjs/writer](https://github.com/dxfjs/writer) (`@tarikjabiri/dxf`) | Gerador de DXF | **Salvar DXF** (abre no AutoCAD, LibreCAD, QCAD) |
 | [jsPDF](https://github.com/parallax/jsPDF) | Geração de PDF | **Salvar PDF** em A4–A0, ajustado ou em escala 1:N |
 | [LibreCAD](https://librecad.org) / [QCAD](https://qcad.org) | CADs 2D de desktop | Inspiração para o conjunto de comandos e o fluxo de trabalho |
@@ -23,6 +24,10 @@ animações) foi escrito para este projeto, em TypeScript, sem framework.
 ## Recursos
 
 - **Abrir:** DWG, DXF, SVG e `.plv` (formato nativo). Também por arrastar e soltar.
+- **Só visualizar** (bilhete 03 do portal): abre DWG/DXF sem montar nada editável — leitura pelo
+  CADCraft num worker e desenho pela placa de vídeo (WebGL; sem WebGL, Canvas 2D). Arrastar,
+  roda do mouse, pinça com dois dedos, toque duplo, camadas (todas, nenhuma, como no arquivo),
+  folhas (layouts), fundo claro/escuro e botão **Editar** para levar o arquivo ao editor.
 - **Salvar como:** `.plv`, `.dxf`, `.svg`, `.pdf`, `.png`, `.jpg`, `.webp`, `.plt` (HPGL para plotters),
   `.gcode` (laser/CNC) e `.geojson` (SIG).
 - **Desenhar:** linha, polilinha, retângulo, círculo, arco por 3 pontos, elipse, polígono, ponto.
@@ -70,6 +75,10 @@ radial, roda do mouse dá zoom, botão do meio (ou Alt+arrastar, ou dois dedos) 
   traços. Liga sozinho em computadores com pouca memória ou poucos núcleos, ou se a tela ficar
   lenta enquanto você edita; a escolha feita no botão fica guardada no navegador.
 
+- **Só visualizar** é o modo mais leve: os traços sobem uma vez para a placa de vídeo e arrastar ou
+  aproximar só muda dois números por quadro; nada é redesenhado sem necessidade; o editor fica
+  parado por trás. Ao aproximar muito, só a região visível é refeita com mais detalhe.
+
 ## Rodar localmente
 
 ```bash
@@ -77,7 +86,8 @@ npm install
 npm run dev      # servidor de desenvolvimento
 npm run build    # gera o site estático em dist/
 npm run preview  # serve o dist/ para conferir
-npm test         # testes (desfazer, índice espacial, geometria)
+npm test         # testes (desfazer, índice espacial, geometria, leitor CADCraft)
+npm run build:cadcraft  # recompila o leitor CADCraft (precisa de Rust; ver cadcraft-wasm/README.md)
 ```
 
 ## Publicar
@@ -90,9 +100,13 @@ Também funciona em Netlify, Vercel, Render ou qualquer hospedagem de arquivos.
 
 - **Salvar em DWG** não é possível no navegador hoje (o LibreDWG para web é compilado sem escrita).
   Salve em **DXF**, que o AutoCAD abre normalmente, e use "Salvar como DWG" lá se precisar.
-- Hachuras, tabelas, sólidos 3D e imagens raster de arquivos DWG/DXF ainda não são exibidos.
+- Imagens raster anexadas e sólidos 3D (ACIS) de arquivos DWG/DXF ainda não são exibidos.
+- No editor, tabelas, cotas sem bloco e chamadas múltiplas (multileader) viram linhas e textos
+  soltos editáveis; tolerâncias geométricas e splines viram polilinhas.
 - Textos usam uma fonte monoespaçada; a largura pode diferir um pouco da fonte original do desenho.
 
 ## Licença
 
-GPL-3.0-or-later (veja `LICENSE`) — compatível com o LibreDWG, que é GPL-3.0.
+GPL-3.0-or-later (veja `LICENSE`) — compatível com o LibreDWG, que é GPL-3.0. O CADCraft e o
+craft-libs são MIT OR Apache-2.0 e o acadrust é MPL-2.0; avisos e textos das licenças em
+`cadcraft-wasm/README.md` e `cadcraft-wasm/licenses/`.

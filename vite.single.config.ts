@@ -2,14 +2,18 @@ import { defineConfig } from 'vite';
 import { fileURLToPath } from 'node:url';
 import { viteSingleFile } from 'vite-plugin-singlefile';
 
-// Gera um único ProjetaLivre.html com tudo embutido (JS, CSS e o leitor de DWG em WebAssembly),
+// Gera um único ProjetaLivre.html com tudo embutido (JS, CSS e o leitor CADCraft em WebAssembly),
 // que abre com duplo clique, sem servidor.
 export default defineConfig({
   base: './',
   plugins: [viteSingleFile({ removeViteModuleLoader: true })],
   // troca o worker em arquivo separado pela versão embutida (blob), que funciona em file://
   resolve: {
-    alias: [{ find: /^\.\/workerFactory$/, replacement: fileURLToPath(new URL('./src/io/workerFactory.inline.ts', import.meta.url)) }],
+    alias: [
+      { find: /^\.\.?\/(io\/)?workerFactory$/, replacement: fileURLToPath(new URL('./src/io/workerFactory.inline.ts', import.meta.url)) },
+      // o leitor reserva de DWG (LibreDWG, 9,5 MB) fica fora do arquivo único: o CADCraft lê o DWG
+      { find: /^@mlightcad\/libredwg-web$/, replacement: fileURLToPath(new URL('./src/io/libredwg.stub.ts', import.meta.url)) },
+    ],
   },
   // worker clássico (iife): o Chrome não permite worker "module" vindo de blob em páginas file://
   worker: { format: 'iife', rollupOptions: { output: { inlineDynamicImports: true } } },

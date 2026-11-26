@@ -8,6 +8,7 @@ import { TOOLS, type ToolDef } from '../editor/tools';
 import { openFile, OPEN_ACCEPT } from '../io/import';
 import { FORMATS, DEFAULT_EXPORT, download, type ExportOptions } from '../io/export';
 import { ICONS } from './icons';
+import { Viewer } from '../viewer/viewer';
 
 const $ = <T extends HTMLElement = HTMLElement>(sel: string, root: ParentNode = document) => root.querySelector(sel) as T;
 const $$ = <T extends HTMLElement = HTMLElement>(sel: string, root: ParentNode = document) => [...root.querySelectorAll(sel)] as T[];
@@ -18,6 +19,7 @@ const LITE_KEY = 'projetalivre:leve';
 
 export class App {
   ed: Editor;
+  viewer: Viewer;
   private history: string[] = [];
   private histIdx = -1;
   private exportFmt = 'dxf';
@@ -32,6 +34,7 @@ export class App {
     this.buildInspector();
     this.buildConsole();
     this.buildPortal();
+    this.viewer = this.buildViewer();
     this.buildExport();
     this.buildHelp();
     this.bindFiles();
@@ -187,7 +190,7 @@ export class App {
 
   private buildActions() {
     const icon: Record<string, string> = { open: 'open', save: 'save', undo: 'undo', redo: 'redo', fit: 'extents', theme: 'sun', help: 'help' };
-    $$('.act').forEach((b) => {
+    $$('.act[data-act]').forEach((b) => {
       const a = b.dataset.act!;
       b.insertAdjacentHTML('afterbegin', ICONS[icon[a]]);
       b.addEventListener('click', () => this.action(a));
@@ -215,7 +218,8 @@ export class App {
     const paper = root.dataset.theme !== 'paper';
     root.dataset.theme = paper ? 'paper' : 'ink';
     this.ed.renderer.paper = paper; this.ed.renderer.dirty = true; this.ed.touch();
-    const b = $('[data-act="theme"]'); b.querySelector('svg')?.remove(); b.insertAdjacentHTML('afterbegin', ICONS[paper ? 'moon' : 'sun']);
+    for (const b of $$('[data-act="theme"], [data-vw="theme"]')) { b.querySelector('svg')?.remove(); b.insertAdjacentHTML('afterbegin', ICONS[paper ? 'moon' : 'sun']); }
+    this.viewer?.redraw();
     try { localStorage.setItem('projetalivre:tema', root.dataset.theme); } catch { /* sem armazenamento */ }
     this.toast(paper ? 'Modo papel' : 'Modo tinta', 'info');
   }
@@ -488,6 +492,7 @@ export class App {
 
   private onKey(ev: KeyboardEvent) {
     if (!$('#portal').classList.contains('gone')) return;
+    if (this.viewer.isOpen) return; // a tela de visualização trata as próprias teclas
     if (document.querySelector('dialog[open]')) return;
     const target = ev.target as HTMLElement;
     if (target.matches('input,textarea,select') && target.id !== 'cmd') return;
@@ -576,7 +581,12 @@ export class App {
   private bindFiles() {
     const input = $<HTMLInputElement>('#file');
     input.accept = OPEN_ACCEPT;
-    input.addEventListener('change', () => { const f = input.files?.[0]; if (f) this.open(f); input.value = ''; });
+    input.addEventListener('change', () => {
+      const f = input.files?.[0];
+      const view = input.dataset.mode === 'view';
+      input.value = ''; input.accept = OPEN_ACCEPT; input.dataset.mode = '';
+      if (f) { if (view) this.view(f); else this.open(f); }
+    });
     const dz = $('#dropzone');
     let depth = 0;
     window.addEventListener('dragenter', (e) => { if (e.dataTransfer?.types.includes('Files')) { depth++; dz.hidden = false; } });
@@ -584,14 +594,15 @@ export class App {
     window.addEventListener('dragover', (e) => e.preventDefault());
     window.addEventListener('drop', (e) => {
       e.preventDefault(); depth = 0; dz.hidden = true;
-      const f = e.dataTransfer?.files?.[0]; if (f) this.open(f);
+      const f = e.dataTransfer?.files?.[0]; if (f) { if (this.viewer.isOpen) this.view(f); else this.open(f); }
     });
     window.addEventListener('beforeunload', (e) => { if (this.ed.doc.dirty) { e.preventDefault(); } });
   }
 
   private opening: AbortController | null = null;
 
-  async open(file: File) {
+  /** Mostra o status de abertura (etapa, %, tempo, cancelar) enquanto `task` roda. */
+  private async withBusy(file: File, task: (setStage: (stage: string, pct: number) => void, signal: AbortSignal) => Promise<void>) {
     if (this.opening) this.opening.abort();
     const ctrl = (this.opening = new AbortController());
     const busy = $('#busy');
@@ -606,13 +617,27 @@ export class App {
     busy.hidden = false;
     const t0 = performance.now();
     const clock = setInterval(() => { $('#busy-time').textContent = `${((performance.now() - t0) / 1000).toFixed(1).replace('.', ',')} s`; }, 100);
-    const cancel = $('#busy-cancel');
-    cancel.onclick = () => ctrl.abort();
-    const frame = () => new Promise((r) => requestAnimationFrame(() => setTimeout(r)));
+    $('#busy-cancel').onclick = () => ctrl.abort();
     try {
-      await frame();
-      const { drawing: d, skipped } = await openFile(file, setStage, ctrl.signal);
-      if (ctrl.signal.aborted) return;
+      await new Promise((r) => requestAnimationFrame(() => setTimeout(r)));
+      await task(setStage, ctrl.signal);
+    } catch (err) {
+      if ((err as Error).name === 'AbortError') { this.toast('Abertura cancelada', 'info'); return; }
+      console.error(err);
+      this.toast('Não foi possível abrir o arquivo', 'warn', (err as Error).message);
+    } finally {
+      clearInterval(clock);
+      if (this.opening === ctrl) { this.opening = null; busy.hidden = true; }
+    }
+  }
+
+  async open(file: File) {
+    if (this.viewer.isOpen) this.closeViewer(false);
+    const t0 = performance.now();
+    const frame = () => new Promise((r) => requestAnimationFrame(() => setTimeout(r)));
+    await this.withBusy(file, async (setStage, signal) => {
+      const { drawing: d, skipped } = await openFile(file, setStage, signal);
+      if (signal.aborted) return;
       setStage(`Montando o desenho… ${d.entities.length.toLocaleString('pt-BR')} objetos`, 97);
       await frame();
       this.load(d);
@@ -630,14 +655,55 @@ export class App {
       const used = new Set(d.entities.map((e) => e.layer));
       const hidden = d.layers.filter((l) => !l.visible && used.has(l.name));
       if (hidden.length) this.log(`${hidden.length} camada(s) desligada(s)/congelada(s) no arquivo original — ative no painel Camadas para ver tudo.`, 'info');
-    } catch (err) {
-      if ((err as Error).name === 'AbortError') { this.toast('Abertura cancelada', 'info'); return; }
-      console.error(err);
-      this.toast('Não foi possível abrir o arquivo', 'warn', (err as Error).message);
-    } finally {
-      clearInterval(clock);
-      if (this.opening === ctrl) { this.opening = null; busy.hidden = true; }
+    });
+  }
+
+  // ================================================================ só visualização
+  private buildViewer(): Viewer {
+    const root = $('#viewer');
+    const icon: Record<string, string> = { back: 'back', fit: 'extents', out: 'minus', in: 'plus', layers: 'layers', theme: 'sun', edit: 'pencil', 'close-layers': 'close' };
+    for (const [k, i] of Object.entries(icon)) $(`[data-vw="${k}"]`, root)?.insertAdjacentHTML('afterbegin', ICONS[i]);
+    return new Viewer({
+      root,
+      lite: () => this.ed.renderer.lite,
+      toast: (t, k, sub) => this.toast(t, k, sub),
+      onEdit: (file) => this.open(file),
+      onClose: () => { this.closeViewer(true); },
+      onTheme: () => this.toggleTheme(),
+    });
+  }
+
+  /** escolhe um DWG/DXF para só visualizar */
+  pickForView() {
+    const input = $<HTMLInputElement>('#file');
+    input.accept = '.dwg,.dxf';
+    input.dataset.mode = 'view';
+    input.click();
+  }
+
+  /** Abre o arquivo na tela de só visualização (sem montar o desenho editável). */
+  async view(file: File) {
+    const ext = file.name.toLowerCase().split('.').pop() ?? '';
+    if (ext !== 'dwg' && ext !== 'dxf') {
+      this.toast('A visualização rápida abre DWG e DXF', 'info', 'Abrindo no editor…');
+      return this.open(file);
     }
+    const t0 = performance.now();
+    await this.withBusy(file, async (setStage, signal) => {
+      await this.viewer.open(file, setStage, signal);
+      // o editor fica parado por trás: nenhum quadro gasto enquanto só se visualiza
+      this.ed.pause();
+      this.hidePortal();
+      const s = ((performance.now() - t0) / 1000).toFixed(1).replace('.', ',');
+      this.toast(`${file.name} aberto para visualizar`, 'ok', `${s} s · arraste para mover · role ou use dois dedos para aproximar`);
+    });
+  }
+
+  /** fecha a visualização; `portal`: volta ao portal (senão, ao editor) */
+  closeViewer(portal: boolean) {
+    this.viewer.close();
+    this.ed.resume();
+    if (portal) this.showPortal();
   }
 
   load(d: Drawing) {
@@ -779,6 +845,7 @@ export class App {
         if (a === 'new') this.load(newDrawing());
         if (a === 'demo') this.load(demoDrawing());
         if (a === 'open') $<HTMLInputElement>('#file').click();
+        if (a === 'view') this.pickForView();
         if (a === 'draft') { try { this.load(JSON.parse(localStorage.getItem(DRAFT_KEY)!)); } catch { this.toast('Rascunho indisponível', 'warn'); } }
       });
     });
