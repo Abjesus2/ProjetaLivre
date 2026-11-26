@@ -11,9 +11,10 @@ interface Exports {
   pl_info(): number;
   pl_display(space: number, tolerance: number, x0: number, y0: number, x1: number, y1: number): number;
   pl_raw(): number;
+  pl_force_layers(ptr: number, len: number): void;
 }
 
-export interface CadLayerInfo { name: string; color: string; on: boolean; frozen: boolean }
+export interface CadLayerInfo { name: string; color: string; on: boolean; frozen: boolean; /** algum objeto usa a camada */ used?: boolean }
 export interface CadSheetInfo { name: string; entities: number }
 export interface CadInfo {
   layers: CadLayerInfo[];
@@ -77,6 +78,13 @@ export class CadCraft {
     const [x0, y0, x1, y1] = win ?? [NaN, NaN, NaN, NaN];
     this.check(this.x.pl_display(space, tolerance, x0, y0, x1, y1));
     return this.result().slice().buffer;
+  }
+
+  /** Camadas mostradas apesar do arquivo (1 por camada, na ordem de `info().layers`), nas próximas montagens. */
+  forceLayers(mask: Uint8Array) {
+    const [p, n] = this.put(mask);
+    this.x.pl_force_layers(p, n);
+    this.x.pl_free(p, n);
   }
 
   /** Estrutura intermediária para o editor (texto JSON, lido por fromRaw em src/io/raw.ts). */

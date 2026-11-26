@@ -9,7 +9,7 @@ import { newDrawing, PALETTE } from '../core/doc';
 import { robustBox } from '../core/geom';
 
 /** Estrutura intermediária no formato do dxf-parser (o DWG é adaptado para ela). */
-export interface RawLayer { name: string; color?: string; visible: boolean; locked?: boolean }
+export interface RawLayer { name: string; color?: string; visible: boolean; locked?: boolean; frozen?: boolean }
 export interface RawDoc {
   entities: any[];
   /** objetos dos layouts (paper space): carimbos, legendas, molduras */
@@ -41,19 +41,26 @@ export function fromRaw(raw: RawDoc, name: string, onCount: (done: number, total
   const out: Entity[] = [];
   const rad = (v: number | undefined) => (v ?? 0) * (raw.angleDeg ? Math.PI / 180 : 1);
 
-  const emit = (e: NewEntity, m: Mat, inherit: { layer?: string; color?: string | null }) => {
+  // camadas congeladas no arquivo: um bloco inserido nelas some inteiro (como no AutoCAD)
+  const frozen = new Set(raw.layers.filter((l) => l.frozen).map((l) => l.name));
+  type Inherit = { layer?: string; color?: string | null; hide?: string };
+
+  const emit = (e: NewEntity, m: Mat, inherit: Inherit) => {
     let layer = e.layer;
     if (inherit.layer && (layer === '0' || !layer)) layer = inherit.layer;
-    addLayer(layer);
+    const own = addLayer(layer);
     let color = (e as any).color as string | null | undefined;
     if (color === null) color = inherit.color ?? undefined;
+    // conteúdo de bloco inserido em camada congelada: fica nessa camada (oculto até ela ser
+    // ligada), com a cor que teria na camada original
+    if (inherit.hide && layer !== inherit.hide) { color = color || own.color; layer = inherit.hide; }
     const ent = { ...e, layer, id: uid() } as Entity;
     if (color) ent.color = color; else delete ent.color;
     out.push(m === I ? ent : transformEntity(ent, m));
   };
 
-  const convert = (r: any, m: Mat, inherit: { layer?: string; color?: string | null }, depth: number) => {
-    if (out.length > 400000) return;
+  const convert = (r: any, m: Mat, inherit: Inherit, depth: number) => {
+    if (out.length > 400000) { if (depth === 0) skip('além do limite de 400 mil objetos do editor (use “Só visualizar”)'); return; }
     const layer = String(r.layer ?? '0');
     const color = r._color as string | null | undefined;
     const b = { layer, color } as any;
@@ -122,8 +129,10 @@ export function fromRaw(raw: RawDoc, name: string, onCount: (done: number, total
       }
       case 'INSERT': case 'DIMENSION': {
         const blk = raw.blocks[r.type === 'INSERT' ? r.name : r.block];
+        const at = layer === '0' ? inherit.layer ?? '0' : layer;
+        const hide = inherit.hide ?? (frozen.has(at) ? at : undefined);
         if (blk && depth < 10) {
-          const nextInherit = { layer: layer === '0' ? inherit.layer : layer, color: color === null ? inherit.color : color ?? addLayer(layer).color };
+          const nextInherit: Inherit = { layer: layer === '0' ? inherit.layer : layer, color: color === null ? inherit.color : color ?? addLayer(layer).color, hide };
           if (r.type === 'DIMENSION') { for (const c of blk.entities) convert(c, m, nextInherit, depth + 1); }
           else {
             const cols = Math.max(1, r.columnCount || 1), rows = Math.max(1, r.rowCount || 1);
@@ -137,7 +146,7 @@ export function fromRaw(raw: RawDoc, name: string, onCount: (done: number, total
           }
         }
         else if (!blk) skip(`bloco ausente (${r.type === 'INSERT' ? r.name : r.block})`);
-        for (const a of r.attribs ?? []) convert(a, m, inherit, depth + 1);
+        for (const a of r.attribs ?? []) convert(a, m, { ...inherit, hide }, depth + 1);
         break;
       }
       case 'ACAD_TABLE': {
@@ -147,7 +156,7 @@ export function fromRaw(raw: RawDoc, name: string, onCount: (done: number, total
         if (!blk) { skip('ACAD_TABLE'); break; }
         const pos = P(r.startPoint), dir = r.directionVector ? P(r.directionVector) : { x: 1, y: 0 };
         const mm = compose(m, compose(rotateAbout(pos, Math.atan2(dir.y, dir.x) || 0), translate(pos.x, pos.y)));
-        for (const c of blk.entities) convert(c, mm, { layer: layer === '0' ? inherit.layer : layer, color: color ?? inherit.color }, depth + 1);
+        for (const c of blk.entities) convert(c, mm, { layer: layer === '0' ? inherit.layer : layer, color: color ?? inherit.color, hide: inherit.hide }, depth + 1);
         break;
       }
       case 'HATCH': {

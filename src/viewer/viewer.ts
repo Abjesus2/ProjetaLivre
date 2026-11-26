@@ -41,6 +41,11 @@ export class Viewer {
   private detail: { d: DisplayData; win: Bounds; tol: number } | null = null;
   private space = 0;
   private visible = new Uint8Array(0);
+  /** camadas desligadas/congeladas no arquivo que o usuário mandou mostrar (a imagem é refeita) */
+  private forced = new Uint8Array(0);
+  /** muda a cada imagem base refeita: pedidos de detalhe antigos são descartados */
+  private gen = 0;
+  private rebuildTimer = 0;
   private v: ViewXf = { cx: 0, cy: 0, s: 1, w: 1, h: 1 };
   private fitS = 1;
   private dpr = 1;
@@ -103,6 +108,7 @@ export class Viewer {
     this.setBase(parseDisplay(res.buf));
     this.visible = new Uint8Array(res.info.layers.length + 1).fill(1);
     res.info.layers.forEach((l, i) => { this.visible[i] = l.on && !l.frozen ? 1 : 0; });
+    this.forced = new Uint8Array(res.info.layers.length);
     this.opened = true;
     this.host.root.hidden = false;
     this.fillHeader();
@@ -128,6 +134,7 @@ export class Viewer {
     this.info = null;
     cancelAnimationFrame(this.raf);
     clearTimeout(this.settle);
+    clearTimeout(this.rebuildTimer);
     if (hide) {
       this.opened = false;
       this.file = null;
@@ -149,6 +156,7 @@ export class Viewer {
   }
 
   private setBase(d: DisplayData) {
+    this.gen++;
     this.base = d;
     this.r?.upload('base', d);
     this.detail = null;
@@ -164,10 +172,10 @@ export class Viewer {
     else f?.(null);
   }
 
-  private request(space: number, tolerance: number, win: Bounds | null): Promise<DisplayData | null> {
+  private request(space: number, tolerance: number, win: Bounds | null, force?: Uint8Array): Promise<DisplayData | null> {
     if (!this.worker) return Promise.resolve(null);
     const id = ++this.reqId;
-    this.worker.postMessage({ op: 'display', id, space, tolerance, win: win ? [win.x0, win.y0, win.x1, win.y1] : null });
+    this.worker.postMessage({ op: 'display', id, space, tolerance, win: win ? [win.x0, win.y0, win.x1, win.y1] : null, force });
     return new Promise((res) => this.waiting.set(id, res));
   }
 
@@ -185,7 +193,8 @@ export class Viewer {
     if (!b || this.space !== 0) return false;
     if (b.tolerance > this.px() * 1.5) return true;
     const vr = this.viewRect();
-    return b.truncated && vr.x1 - vr.x0 < (b.full.x1 - b.full.x0) / 3;
+    // imagem afastada incompleta (desenho enorme): ao aproximar, a região visível vem inteira
+    return b.truncated && this.v.s > this.fitS * 1.25 && vr.x1 > vr.x0;
   }
 
   private detailCovers(): boolean {
@@ -206,10 +215,11 @@ export class Viewer {
     const tol = this.px() * 0.75;
     this.inFlight++;
     this.setNote('Refinando a região visível…');
+    const gen = this.gen;
     const d = await this.request(0, tol, win);
     this.inFlight--;
     if (!this.base) return;
-    if (d) {
+    if (d && gen === this.gen) {
       this.detail = { d, win, tol };
       this.r?.upload('detail', d);
     }
@@ -381,7 +391,7 @@ export class Viewer {
         case 'back': this.host.onClose(); break;
         case 'all': this.setAll(1); break;
         case 'none': this.setAll(0); break;
-        case 'file': this.info?.layers.forEach((l, i) => { this.visible[i] = l.on && !l.frozen ? 1 : 0; }); this.syncLayerChecks(); this.schedule(); break;
+        case 'file': this.asInFile(); break;
         case 'close-layers': this.showLayers(false); break;
       }
     }));
@@ -389,7 +399,11 @@ export class Viewer {
     $(root, '.vw-layer-list').addEventListener('change', (ev) => {
       const cb = ev.target as HTMLInputElement;
       const i = Number(cb.dataset.i);
-      if (Number.isInteger(i)) { this.visible[i] = cb.checked ? 1 : 0; this.schedule(); }
+      if (!Number.isInteger(i)) return;
+      this.visible[i] = cb.checked ? 1 : 0;
+      // desligada/congelada no arquivo: não está na imagem; é refeita com (ou sem) ela
+      if (this.hiddenInFile(i)) { this.forced[i] = cb.checked ? 1 : 0; this.rebuildSoon(); }
+      this.schedule();
     });
   }
 
@@ -404,9 +418,49 @@ export class Viewer {
 
   private setAll(v: 0 | 1) {
     if (!this.info) return;
-    for (let i = 0; i < this.info.layers.length; i++) this.visible[i] = v;
+    let changed = false;
+    this.info.layers.forEach((l, i) => {
+      this.visible[i] = v;
+      if (v && this.hiddenInFile(i) && l.used !== false && !this.forced[i]) { this.forced[i] = 1; changed = true; }
+    });
     this.syncLayerChecks();
+    if (changed) this.rebuildSoon();
     this.schedule();
+  }
+
+  /** camadas como vieram no arquivo */
+  private asInFile() {
+    if (!this.info) return;
+    this.info.layers.forEach((l, i) => { this.visible[i] = l.on && !l.frozen ? 1 : 0; });
+    const changed = this.forced.some((f) => f !== 0);
+    this.forced.fill(0);
+    this.syncLayerChecks();
+    if (changed) this.rebuildSoon();
+    this.schedule();
+  }
+
+  private hiddenInFile(i: number): boolean {
+    const l = this.info?.layers[i];
+    return !!l && !(l.on && !l.frozen);
+  }
+
+  private rebuildSoon() {
+    clearTimeout(this.rebuildTimer);
+    this.rebuildTimer = window.setTimeout(() => void this.rebuild(), 300);
+  }
+
+  /** refaz a imagem base com as camadas forçadas atuais (mantém a vista) */
+  private async rebuild() {
+    if (!this.worker || !this.base) return;
+    this.setNote('Atualizando as camadas…');
+    const gen = ++this.gen;
+    const d = await this.request(this.space, 0, null, this.forced.slice());
+    if (gen !== this.gen) return; // outra montagem tomou o lugar
+    this.setNote('');
+    if (!d || !this.base) { this.host.toast('Não foi possível atualizar as camadas', 'warn'); return; }
+    this.setBase(d);
+    this.schedule();
+    this.settleLater();
   }
 
   private syncLayerChecks() {
@@ -458,9 +512,13 @@ export class Viewer {
   private fillLayers() {
     const info = this.info!, b = this.base!;
     const count = (l: number) => b.lineStart[l + 1] - b.lineStart[l] + b.triStart[l + 1] - b.triStart[l] + b.ptStart[l + 1] - b.ptStart[l];
-    const items = info.layers.map((l, i) => ({ l, i, n: count(i) })).filter((x) => x.n > 0).sort((a, z) => a.l.name.localeCompare(z.l.name, 'pt-BR', { numeric: true }));
+    // camadas com traços na imagem, e as desligadas/congeladas no arquivo que têm objetos
+    const items = info.layers.map((l, i) => ({ l, i, n: count(i) }))
+      .filter((x) => x.n > 0 || (this.hiddenInFile(x.i) && x.l.used !== false))
+      .sort((a, z) => a.l.name.localeCompare(z.l.name, 'pt-BR', { numeric: true }));
+    const state = (l: CadInfo['layers'][number]) => (l.frozen ? '<small>congelada no arquivo</small>' : l.on ? '' : '<small>desligada no arquivo</small>');
     $(this.host.root, '.vw-layer-list').innerHTML = items.length
-      ? items.map(({ l, i }) => `<li><label><input type="checkbox" data-i="${i}"${this.visible[i] ? ' checked' : ''}/><i style="--c:${l.color}"></i><span>${escapeHtml(l.name)}</span>${l.on && !l.frozen ? '' : '<small>desligada no arquivo</small>'}</label></li>`).join('')
+      ? items.map(({ l, i }) => `<li><label><input type="checkbox" data-i="${i}"${this.visible[i] ? ' checked' : ''}/><i style="--c:${l.color}"></i><span>${escapeHtml(l.name)}</span>${state(l)}</label></li>`).join('')
       : '<li class="vw-empty">Nenhuma camada com objetos</li>';
   }
 }

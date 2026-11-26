@@ -13,7 +13,7 @@ import { CadCraft } from './cadcraft/bridge';
 type Msg =
   | { op: 'edit'; kind: 'dxf' | 'dwg'; data: ArrayBuffer; name: string; module?: WebAssembly.Module | null }
   | { op: 'view'; data: ArrayBuffer; name: string; module: WebAssembly.Module }
-  | { op: 'display'; id: number; space: number; tolerance: number; win: [number, number, number, number] | null };
+  | { op: 'display'; id: number; space: number; tolerance: number; win: [number, number, number, number] | null; force?: Uint8Array };
 
 const post = (m: unknown, transfer: Transferable[] = []) => (self as unknown as Worker).postMessage(m, transfer);
 const progress = (stage: string, pct: number) => post({ type: 'progress', stage, pct });
@@ -27,6 +27,7 @@ self.onmessage = async (ev: MessageEvent<Msg>) => {
     else if (m.op === 'view') await view(m);
     else if (m.op === 'display') {
       if (!viewer) throw new Error('Nenhum desenho aberto no visualizador');
+      if (m.force) viewer.forceLayers(m.force);
       const buf = viewer.display(m.space, m.tolerance, m.win);
       post({ type: 'display', id: m.id, buf }, [buf]);
     }

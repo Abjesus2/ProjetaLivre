@@ -28,6 +28,9 @@ animações) foi escrito para este projeto, em TypeScript, sem framework.
   CADCraft num worker e desenho pela placa de vídeo (WebGL; sem WebGL, Canvas 2D). Arrastar,
   roda do mouse, pinça com dois dedos, toque duplo, camadas (todas, nenhuma, como no arquivo),
   folhas (layouts), fundo claro/escuro e botão **Editar** para levar o arquivo ao editor.
+  Camadas desligadas ou congeladas no arquivo ficam de fora como no AutoCAD (um bloco inserido
+  numa camada congelada some inteiro) e podem ser ligadas no painel (a imagem é refeita).
+  Desenhos com milhões de cópias de blocos são montados em partes, sem cortar o fim.
 - **Salvar como:** `.plv`, `.dxf`, `.svg`, `.pdf`, `.png`, `.jpg`, `.webp`, `.plt` (HPGL para plotters),
   `.gcode` (laser/CNC) e `.geojson` (SIG).
 - **Desenhar:** linha, polilinha, retângulo, círculo, arco por 3 pontos, elipse, polígono, ponto.

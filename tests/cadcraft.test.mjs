@@ -81,6 +81,54 @@ if (fpInfo.sheets.length) {
   check('folha tem o papel como enquadramento', sheet.sheet !== null && sheet.sheet.x1 > sheet.sheet.x0);
 }
 
+// ---- bloco inserido numa camada congelada: some inteiro (como no AutoCAD), inclusive o conteúdo
+// que está em camadas ligadas; aparece só se a camada for mostrada. Muitos blocos (mais cópias que
+// o limite do renderizador, 2 milhões): a imagem não fica cortada.
+const dxf = (n) => {
+  const o = []; const g = (c, v) => o.push(String(c), String(v));
+  g(0, 'SECTION'); g(2, 'HEADER'); g(9, '$ACADVER'); g(1, 'AC1009'); g(0, 'ENDSEC');
+  g(0, 'SECTION'); g(2, 'TABLES'); g(0, 'TABLE'); g(2, 'LAYER'); g(70, 5);
+  for (const [name, flags, color] of [['0', 0, 7], ['PALETES', 0, 1], ['EIXOS', 0, 8], ['XREF', 1, 7], ['FIM', 0, 3]]) { g(0, 'LAYER'); g(2, name); g(70, flags); g(62, color); g(6, 'CONTINUOUS'); }
+  g(0, 'ENDTAB'); g(0, 'ENDSEC');
+  g(0, 'SECTION'); g(2, 'BLOCKS');
+  g(0, 'BLOCK'); g(8, '0'); g(2, 'PALETE'); g(70, 0); g(10, 0); g(20, 0); g(30, 0); g(3, 'PALETE');
+  for (let i = 0; i < 150; i++) { g(0, 'LINE'); g(8, 'PALETES'); g(10, i % 10); g(20, Math.floor(i / 10)); g(30, 0); g(11, (i % 10) + 0.8); g(21, Math.floor(i / 10) + 0.5); g(31, 0); }
+  g(0, 'ENDBLK'); g(8, '0');
+  g(0, 'BLOCK'); g(8, '0'); g(2, 'GRADE'); g(70, 0); g(10, 0); g(20, 0); g(30, 0); g(3, 'GRADE');
+  for (let i = 0; i < 30; i++) { g(0, 'LINE'); g(8, 'EIXOS'); g(10, i * 70); g(20, -500); g(30, 0); g(11, i * 70); g(21, 3000); g(31, 0); }
+  g(0, 'ENDBLK'); g(8, '0'); g(0, 'ENDSEC');
+  g(0, 'SECTION'); g(2, 'ENTITIES');
+  g(0, 'INSERT'); g(8, 'XREF'); g(2, 'GRADE'); g(10, 0); g(20, 0); g(30, 0);
+  for (let i = 0; i < n; i++) { g(0, 'INSERT'); g(8, 'PALETES'); g(2, 'PALETE'); g(10, (i % 200) * 12); g(20, Math.floor(i / 200) * 18); g(30, 0); }
+  g(0, 'CIRCLE'); g(8, 'FIM'); g(10, 1200); g(20, 900); g(30, 0); g(40, 300);
+  g(0, 'ENDSEC'); g(0, 'EOF');
+  return new TextEncoder().encode(o.join('\n') + '\n');
+};
+const segs = (d, info, name) => { const i = info.layers.findIndex((l) => l.name === name); return (d.lineStart[i + 1] - d.lineStart[i]) / 2; };
+cc.open(dxf(20), 'congelada.dxf');
+let info = cc.info();
+let img = parseDisplay(cc.display(0));
+check('bloco em camada congelada não aparece (nem o conteúdo em camada ligada)', segs(img, info, 'EIXOS') === 0 && segs(img, info, 'PALETES') > 0);
+check('camada congelada com objetos aparece na lista como usada', info.layers.find((l) => l.name === 'XREF')?.used === true);
+const mask = new Uint8Array(info.layers.length); mask[info.layers.findIndex((l) => l.name === 'XREF')] = 1;
+cc.forceLayers(mask);
+img = parseDisplay(cc.display(0));
+check('ao mostrar a camada congelada, o bloco aparece', segs(img, info, 'EIXOS') > 0);
+cc.forceLayers(new Uint8Array(info.layers.length));
+const ed = fromRaw(JSON.parse(cc.raw()), 'c', () => {});
+const eixos = ed.drawing.entities.filter((e) => e.type === 'line' && Math.abs(e.a.y + 500) < 1e-6 && Math.abs(e.b.y - 3000) < 1e-6);
+const xref = ed.drawing.layers.find((l) => l.name === 'XREF');
+check('no editor, o conteúdo do bloco congelado fica oculto junto com a camada dele', eixos.length === 30 && eixos.every((e) => e.layer === 'XREF') && xref && !xref.visible);
+check('no editor, ele mantém a cor que teria na camada original', eixos.every((e) => e.color && e.color.toLowerCase() !== (xref?.color ?? '').toLowerCase()), eixos[0]?.color);
+
+const N = 20000; // 3 milhões de cópias de objetos de blocos
+cc.open(dxf(N), 'muitos-blocos.dxf');
+info = cc.info();
+img = parseDisplay(cc.display(0));
+check('muitos blocos: imagem completa, sem corte', !img.truncated && segs(img, info, 'PALETES') === N * 150, `${segs(img, info, 'PALETES')} de ${N * 150} segmentos`);
+check('muitos blocos: o último objeto do desenho aparece', segs(img, info, 'FIM') > 0);
+check('muitos blocos: lista coerente', coherent(img).length === 0, coherent(img).join('; '));
+
 // ---- arquivo inválido: erro com mensagem, e o leitor continua funcionando
 let msg = '';
 try { cc.open(new TextEncoder().encode('isto não é um desenho'), 'ruim.dwg'); } catch (e) { msg = e.message; }

@@ -32,6 +32,7 @@ async function parseDxf(text: string): Promise<RawDoc> {
     name: String(l.name),
     color: l.colorIndex != null && l.colorIndex > 0 ? aciToHex(l.colorIndex) : typeof l.color === 'number' ? rgbIntToHex(l.color) : undefined,
     visible: l.visible !== false && !l.frozen,
+    frozen: !!l.frozen,
   }));
   const blocks: RawDoc['blocks'] = {};
   for (const [k, b] of Object.entries<any>(dxf.blocks ?? {})) blocks[k] = { base: b.position ?? { x: 0, y: 0 }, entities: b.entities ?? [] };
@@ -66,6 +67,7 @@ async function parseDwg(buf: ArrayBuffer, { mod, lib }: { mod: any; lib: any }):
     name: String(l.name),
     color: l.colorIndex > 0 && l.colorIndex < 256 ? aciToHex(l.colorIndex) : typeof l.color === 'number' && l.color >= 0 ? rgbIntToHex(l.color) : undefined,
     visible: !l.off && !l.frozen,
+    frozen: !!l.frozen,
     // o campo `locked` da libredwg-web não é confiável; o bit 4 de standardFlag é o oficial
     locked: ((l.standardFlag ?? 0) & 4) !== 0,
   }));

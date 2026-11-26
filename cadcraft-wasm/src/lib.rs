@@ -112,6 +112,15 @@ pub extern "C" fn pl_info() -> i32 {
             set_result(b"nenhum desenho aberto".to_vec());
             return 1;
         };
+        // camadas usadas por algum objeto (do modelo, das folhas ou de blocos): o visualizador
+        // lista as desligadas no arquivo só se tiverem conteúdo
+        let mut used = std::collections::HashSet::new();
+        let stores = std::iter::once(&d.model).chain(d.blocks.values().map(|b| &b.entities)).chain(d.layouts.iter().map(|l| &l.entities));
+        for st in stores {
+            for e in st.iter() {
+                used.insert(e.common.layer.to_ascii_lowercase());
+            }
+        }
         let mut j = String::from("{\"layers\":[");
         for (i, l) in d.layers.iter().enumerate() {
             if i > 0 {
@@ -119,11 +128,12 @@ pub extern "C" fn pl_info() -> i32 {
             }
             let rgb = l.color.resolve(l.color, l.color);
             j.push_str(&format!(
-                "{{\"name\":{},\"color\":\"#{:06x}\",\"on\":{},\"frozen\":{}}}",
+                "{{\"name\":{},\"color\":\"#{:06x}\",\"on\":{},\"frozen\":{},\"used\":{}}}",
                 esc(&l.name),
                 rgb.to_u32(),
                 l.on,
-                l.frozen
+                l.frozen,
+                used.contains(&l.name.to_ascii_lowercase())
             ));
         }
         let version = d.header.get("ACADVER").and_then(cadcraft_doc::HVal::as_str).unwrap_or("");
@@ -204,132 +214,160 @@ fn quantile(v: &mut [f64], p: f64) -> f64 {
     v[i.min(v.len() - 1)]
 }
 
-fn display(d: &mut Drawing, space: i32, tolerance: f64, vx0: f64, vy0: f64, vx1: f64, vy1: f64) -> Vec<u8> {
-    use cadcraft_geom::Bounds2;
-    let sp = space_of(d, space);
-    let windowed = matches!(sp, Space::Model) && vx0.is_finite() && vy0.is_finite() && vx1.is_finite() && vy1.is_finite();
-    let ext = d.extents(&sp);
-    let diag = if ext.is_empty() { 1.0 } else { (ext.width().powi(2) + ext.height().powi(2)).sqrt().max(1e-9) };
-    let tol = if tolerance > 0.0 { tolerance } else { diag / 20000.0 };
-    let win = Bounds2::new(Vec2::new(vx0, vy0), Vec2::new(vx1, vy1));
-    let opts = Options {
-        tolerance: tol,
-        min_dash: tol * 4.0,
-        text: true,
-        linetypes: true,
-        fill: true,
-        lineweights: false,
-        view: if windowed { Some(win) } else { None },
-        ..Options::default()
-    };
-    // Todas as camadas entram (o visualizador liga e desliga cada uma); o estado do arquivo
-    // volta logo depois. A montagem "de plotagem" informa a camada de cada traço, inclusive
-    // dentro de blocos.
-    let saved: Vec<(bool, bool)> = d.layers.iter().map(|l| (l.on, l.frozen)).collect();
-    for l in d.layers.iter_mut() {
-        l.on = true;
-        l.frozen = false;
+// Camadas que o visualizador mandou mostrar mesmo desligadas ou congeladas no arquivo
+// (1 byte por camada, na ordem de `pl_info`).
+thread_local! {
+    static FORCED: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Define as camadas mostradas apesar do arquivo (bytes 0/1 em `ptr`, um por camada).
+///
+/// # Safety
+/// A área precisa ser válida (reservada por [`pl_alloc`]).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pl_force_layers(ptr: *const u8, len: usize) {
+    // SAFETY: o chamador passa uma área reservada por pl_alloc, com o tamanho certo.
+    let v = if len == 0 { Vec::new() } else { unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec() };
+    FORCED.with(|f| *f.borrow_mut() = v);
+}
+
+/// Quantas cópias de objetos de bloco o renderizador visita para desenhar `e` (o orçamento
+/// [`cadcraft_render::MAX_BLOCK_EXPANSION`] conta isso).
+fn expansion(d: &Drawing, e: &cadcraft_doc::Entity, memo: &mut HashMap<String, u64>, depth: usize) -> u64 {
+    use cadcraft_doc::EntityKind as K;
+    let block = |name: &str, memo: &mut HashMap<String, u64>| block_expansion(d, name, memo, depth + 1);
+    match &e.kind {
+        K::Insert(i) => u64::from(i.rows.max(1)).saturating_mul(u64::from(i.cols.max(1))).saturating_mul(1 + block(&i.block, memo)),
+        K::Dimension(dm) => dm.block.as_deref().map_or(0, |b| block(b, memo)),
+        K::MLeader(m) => m.block.as_ref().map_or(0, |i| 1 + block(&i.block, memo)),
+        _ => 0,
     }
-    let list = if windowed {
-        // detalhe ao aproximar muito: só os objetos que tocam a janela
-        let mut cache = cadcraft_doc::BlockBoundsCache::default();
+}
+
+fn block_expansion(d: &Drawing, name: &str, memo: &mut HashMap<String, u64>, depth: usize) -> u64 {
+    if depth > cadcraft_doc::MAX_BLOCK_DEPTH {
+        return 0;
+    }
+    let key = name.to_ascii_lowercase();
+    if let Some(&c) = memo.get(&key) {
+        return c;
+    }
+    memo.insert(key.clone(), 0); // referência circular: não conta de novo
+    let Some(b) = d.block(name) else { return 0 };
+    let c = b.entities.iter().fold(0u64, |acc, e| acc.saturating_add(1).saturating_add(expansion(d, e, memo, depth)));
+    memo.insert(key, c);
+    c
+}
+
+/// Pontos no total, somando as partes (cada parte do renderizador aceita até 64 milhões). Acima
+/// disso a imagem afastada fica incompleta e o resto aparece no detalhe ao aproximar (memória).
+const MAX_TOTAL_POINTS: usize = 24_000_000;
+/// Cópias de objetos de bloco por parte: abaixo do limite do renderizador (2 milhões).
+const PART_EXPANSION: u64 = 1_500_000;
+
+/// Monta os objetos `all` do modelo em partes (o limite de cópias de blocos do renderizador
+/// deixaria de fora o fim de desenhos grandes) e entrega cada parte a `each` assim que fica
+/// pronta, para a memória não acumular. `each` devolve false para parar.
+fn build_model(d: &mut Drawing, all: Vec<std::sync::Arc<cadcraft_doc::Entity>>, opts: &Options, mut each: impl FnMut(cadcraft_render::DisplayList) -> bool) {
+    let mut memo = HashMap::new();
+    let mut parts: Vec<Vec<std::sync::Arc<cadcraft_doc::Entity>>> = vec![Vec::new()];
+    let mut cost = 0u64;
+    for e in all {
+        let c = 1 + expansion(d, &e, &mut memo, 0);
+        if cost > 0 && cost.saturating_add(c) > PART_EXPANSION {
+            parts.push(Vec::new());
+            cost = 0;
+        }
+        cost = cost.saturating_add(c);
+        if let Some(p) = parts.last_mut() {
+            p.push(e);
+        }
+    }
+    let full = std::mem::take(&mut d.model);
+    for part in parts {
         let mut sub = cadcraft_doc::EntityStore::new();
-        for e in d.model.iter() {
-            let b = cadcraft_doc::extent_bounds_cached(d, e, &mut cache);
-            if b.is_empty() || (b.max.x >= win.min.x && b.min.x <= win.max.x && b.max.y >= win.min.y && b.min.y <= win.max.y) {
-                sub.push((**e).clone());
-            }
+        for e in part {
+            sub.push((*e).clone());
         }
-        let full = std::mem::replace(&mut d.model, sub);
-        let list = cadcraft_render::build_plot(d, &Space::Model, &opts);
-        d.model = full;
-        list
-    } else {
-        cadcraft_render::build_plot(d, &sp, &opts)
-    };
-    for (l, (on, frozen)) in d.layers.iter_mut().zip(saved) {
-        l.on = on;
-        l.frozen = frozen;
+        d.model = sub;
+        let list = cadcraft_render::build_plot(d, &Space::Model, opts);
+        if !each(list) {
+            break;
+        }
     }
-    let n_layers = d.layers.len() as u32 + 1; // a última: traços sem camada conhecida
-    let none = n_layers - 1;
-    let layer_of = |i: usize| list.prim_layers.get(i).copied().filter(|&l| l < none).unwrap_or(none);
+    d.model = full;
+}
 
-    // extensão "robusta" (sem o lixo muito distante comum em DWG): 2% a 98% dos objetos
-    let (mut xs0, mut ys0, mut xs1, mut ys1) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    let mut full = Bounds2::EMPTY;
-    for p in &list.prims {
-        let pts: &[Vec2] = match p.kind {
-            Kind::Tris | Kind::Mask => list.tris.get(p.start as usize..(p.start + p.len) as usize).unwrap_or(&[]),
-            Kind::Polyline | Kind::Point => list.verts.get(p.start as usize..(p.start + p.len) as usize).unwrap_or(&[]),
-            _ => &[],
-        };
-        let mut b = Bounds2::EMPTY;
-        for q in pts {
+/// Traços de uma camada, já no formato do visualizador.
+#[derive(Default)]
+struct LayerBuf {
+    line_pos: Vec<f32>,
+    line_col: Vec<u32>,
+    /// índices relativos aos vértices desta camada
+    line_idx: Vec<u32>,
+    tri_pos: Vec<f32>,
+    tri_col: Vec<u32>,
+    pt_pos: Vec<f32>,
+    pt_col: Vec<u32>,
+}
+
+/// Recebe as partes montadas e converte na hora (coordenadas relativas à origem, em f32).
+struct Sink {
+    layers: Vec<LayerBuf>,
+    origin: Vec2,
+    far: f64,
+    full: cadcraft_geom::Bounds2,
+    images: u32,
+    points: usize,
+    truncated: bool,
+}
+
+impl Sink {
+    fn new(n_layers: usize, robust: cadcraft_geom::Bounds2) -> Sink {
+        Sink {
+            layers: (0..n_layers).map(|_| LayerBuf::default()).collect(),
+            origin: robust.center(),
+            far: (robust.width().powi(2) + robust.height().powi(2)).sqrt().max(1e-9) * 20.0,
+            full: cadcraft_geom::Bounds2::EMPTY,
+            images: 0,
+            points: 0,
+            truncated: false,
+        }
+    }
+
+    fn add(&mut self, list: &cadcraft_render::DisplayList) {
+        use cadcraft_geom::Bounds2;
+        let none = self.layers.len() - 1;
+        let (ox, oy, far) = (self.origin.x, self.origin.y, self.far);
+        let rel = |q: &Vec2| [(q.x - ox) as f32, (q.y - oy) as f32];
+        let mut full = self.full;
+        let mut grow = |q: &Vec2| {
             if q.x.is_finite() && q.y.is_finite() {
-                b = b.union(&Bounds2::new(*q, *q));
+                full = full.union(&Bounds2::new(*q, *q));
             }
-        }
-        if !b.is_empty() {
-            full = full.union(&b);
-            xs0.push(b.min.x);
-            ys0.push(b.min.y);
-            xs1.push(b.max.x);
-            ys1.push(b.max.y);
-        }
-    }
-    let (lo, hi) = if xs0.len() > 50 { (0.02, 0.98) } else { (0.0, 1.0) };
-    let robust = if xs0.is_empty() {
-        Bounds2::new(Vec2::new(0.0, 0.0), Vec2::new(1.0, 1.0))
-    } else {
-        Bounds2::new(Vec2::new(quantile(&mut xs0, lo), quantile(&mut ys0, lo)), Vec2::new(quantile(&mut xs1, hi), quantile(&mut ys1, hi)))
-    };
-    // folha: o enquadramento é o papel
-    let sheet = list.sheet.as_ref().map(cadcraft_render::Sheet::bounds).filter(|b| !b.is_empty() && b.width() > 0.0 && b.height() > 0.0);
-    let robust = sheet.unwrap_or(robust);
-    let origin = robust.center();
-    let far = (robust.width().powi(2) + robust.height().powi(2)).sqrt().max(1e-9) * 20.0;
-
-    // agrupa por camada mantendo a ordem do desenho dentro de cada uma
-    let mut by_layer: Vec<Vec<usize>> = vec![Vec::new(); n_layers as usize];
-    for i in 0..list.prims.len() {
-        by_layer[layer_of(i) as usize].push(i);
-    }
-
-    let mut line_pos: Vec<f32> = Vec::new();
-    let mut line_col: Vec<u32> = Vec::new();
-    let mut line_idx: Vec<u32> = Vec::new();
-    let mut tri_pos: Vec<f32> = Vec::new();
-    let mut tri_col: Vec<u32> = Vec::new();
-    let mut pt_pos: Vec<f32> = Vec::new();
-    let mut pt_col: Vec<u32> = Vec::new();
-    let mut layer_lines = vec![0u32];
-    let mut layer_tris = vec![0u32];
-    let mut layer_pts = vec![0u32];
-    let mut images = 0u32;
-    let rel = |q: &Vec2| [(q.x - origin.x) as f32, (q.y - origin.y) as f32];
-
-    for prims in &by_layer {
-        for &i in prims {
-            let p = &list.prims[i];
+        };
+        for (i, p) in list.prims.iter().enumerate() {
+            let l = list.prim_layers.get(i).map(|&l| l as usize).filter(|&l| l < none).unwrap_or(none);
+            let buf = &mut self.layers[l];
             let col = rgba(p.color.0, p.color.1, p.color.2, if p.aci7 { 254 } else { 255 });
             let (s, n) = (p.start as usize, p.len as usize);
             match p.kind {
                 Kind::Polyline => {
                     let Some(pts) = list.verts.get(s..s + n) else { continue };
-                    let base = (line_pos.len() / 2) as u32;
+                    let base = (buf.line_pos.len() / 2) as u32;
                     let mut k = 0u32;
                     for q in pts {
                         if !(q.x.is_finite() && q.y.is_finite()) {
                             continue;
                         }
+                        grow(q);
                         let [x, y] = rel(q);
-                        line_pos.push(x);
-                        line_pos.push(y);
-                        line_col.push(col);
+                        buf.line_pos.push(x);
+                        buf.line_pos.push(y);
+                        buf.line_col.push(col);
                         if k > 0 {
-                            line_idx.push(base + k - 1);
-                            line_idx.push(base + k);
+                            buf.line_idx.push(base + k - 1);
+                            buf.line_idx.push(base + k);
                         }
                         k += 1;
                     }
@@ -338,69 +376,202 @@ fn display(d: &mut Drawing, space: i32, tolerance: f64, vx0: f64, vy0: f64, vx1:
                     let (Some(b), Some(dir)) = (list.verts.get(s), list.verts.get(s + 1)) else { continue };
                     let a = if ray { *b } else { Vec2::new(b.x - dir.x * far, b.y - dir.y * far) };
                     let z = Vec2::new(b.x + dir.x * far, b.y + dir.y * far);
-                    let base = (line_pos.len() / 2) as u32;
+                    let base = (buf.line_pos.len() / 2) as u32;
                     for q in [a, z] {
                         let [x, y] = rel(&q);
-                        line_pos.push(x);
-                        line_pos.push(y);
-                        line_col.push(col);
+                        buf.line_pos.push(x);
+                        buf.line_pos.push(y);
+                        buf.line_col.push(col);
                     }
-                    line_idx.push(base);
-                    line_idx.push(base + 1);
+                    buf.line_idx.push(base);
+                    buf.line_idx.push(base + 1);
                 }
                 Kind::Tris | Kind::Mask => {
                     let Some(pts) = list.tris.get(s..s + n) else { continue };
                     let c = if matches!(p.kind, Kind::Mask) { rgba(0, 0, 0, 253) } else { col };
                     for q in pts {
+                        grow(q);
                         let [x, y] = rel(q);
-                        tri_pos.push(x);
-                        tri_pos.push(y);
-                        tri_col.push(c);
+                        buf.tri_pos.push(x);
+                        buf.tri_pos.push(y);
+                        buf.tri_col.push(c);
                     }
                 }
                 Kind::Point => {
                     let Some(q) = list.verts.get(s) else { continue };
+                    grow(q);
                     let [x, y] = rel(q);
-                    pt_pos.push(x);
-                    pt_pos.push(y);
-                    pt_col.push(col);
+                    buf.pt_pos.push(x);
+                    buf.pt_pos.push(y);
+                    buf.pt_col.push(col);
                 }
-                Kind::Image { .. } => images += 1,
+                Kind::Image { .. } => self.images += 1,
             }
         }
-        layer_lines.push(line_idx.len() as u32);
-        layer_tris.push((tri_pos.len() / 2) as u32);
-        layer_pts.push((pt_pos.len() / 2) as u32);
+        self.full = full;
+        self.points += list.verts.len() + list.tris.len();
+        self.truncated |= list.truncated;
     }
 
-    // cabeçalho (160 bytes) + seções alinhadas a 4 bytes
-    let mut out: Vec<u8> = Vec::with_capacity(160 + (line_pos.len() + tri_pos.len() + pt_pos.len()) * 4 * 2 + line_idx.len() * 4);
-    let u32s = |o: &mut Vec<u8>, v: &[u32]| v.iter().for_each(|x| o.extend_from_slice(&x.to_le_bytes()));
-    let f32s = |o: &mut Vec<u8>, v: &[f32]| v.iter().for_each(|x| o.extend_from_slice(&x.to_le_bytes()));
-    let f64s = |o: &mut Vec<u8>, v: &[f64]| v.iter().for_each(|x| o.extend_from_slice(&x.to_le_bytes()));
-    let flags = u32::from(list.truncated) | if images > 0 { 2 } else { 0 };
-    u32s(
-        &mut out,
-        &[0x3156_4c50, 2, n_layers, (line_pos.len() / 2) as u32, line_idx.len() as u32, (tri_pos.len() / 2) as u32, (pt_pos.len() / 2) as u32, flags],
-    );
-    f64s(&mut out, &[origin.x, origin.y]);
-    let fb = if full.is_empty() { robust } else { full };
-    f64s(&mut out, &[fb.min.x, fb.min.y, fb.max.x, fb.max.y]);
-    f64s(&mut out, &[robust.min.x, robust.min.y, robust.max.x, robust.max.y]);
-    let sh = sheet.map_or([f64::NAN; 4], |b| [b.min.x, b.min.y, b.max.x, b.max.y]);
-    f64s(&mut out, &sh);
-    f64s(&mut out, &[tol, 0.0]);
-    u32s(&mut out, &layer_lines);
-    u32s(&mut out, &layer_tris);
-    u32s(&mut out, &layer_pts);
-    f32s(&mut out, &line_pos);
-    u32s(&mut out, &line_col);
-    u32s(&mut out, &line_idx);
-    f32s(&mut out, &tri_pos);
-    u32s(&mut out, &tri_col);
-    f32s(&mut out, &pt_pos);
-    u32s(&mut out, &pt_col);
-    out
+    /// Cabeçalho (160 bytes) + seções, como descrito em `src/viewer/format.ts`.
+    fn finish(mut self, robust: cadcraft_geom::Bounds2, sheet: Option<cadcraft_geom::Bounds2>, tol: f64) -> Vec<u8> {
+        let n_layers = self.layers.len();
+        let nv: usize = self.layers.iter().map(|l| l.line_col.len()).sum();
+        let ni: usize = self.layers.iter().map(|l| l.line_idx.len()).sum();
+        let nt: usize = self.layers.iter().map(|l| l.tri_col.len()).sum();
+        let np: usize = self.layers.iter().map(|l| l.pt_col.len()).sum();
+        let mut out: Vec<u8> = Vec::with_capacity(160 + 12 * (n_layers + 1) + nv * 12 + ni * 4 + nt * 12 + np * 12);
+        let u32s = |o: &mut Vec<u8>, v: &[u32]| v.iter().for_each(|x| o.extend_from_slice(&x.to_le_bytes()));
+        let f32s = |o: &mut Vec<u8>, v: &[f32]| v.iter().for_each(|x| o.extend_from_slice(&x.to_le_bytes()));
+        let f64s = |o: &mut Vec<u8>, v: &[f64]| v.iter().for_each(|x| o.extend_from_slice(&x.to_le_bytes()));
+        let flags = u32::from(self.truncated) | if self.images > 0 { 2 } else { 0 };
+        u32s(&mut out, &[0x3156_4c50, 2, n_layers as u32, nv as u32, ni as u32, nt as u32, np as u32, flags]);
+        f64s(&mut out, &[self.origin.x, self.origin.y]);
+        let fb = if self.full.is_empty() { robust } else { self.full };
+        f64s(&mut out, &[fb.min.x, fb.min.y, fb.max.x, fb.max.y]);
+        f64s(&mut out, &[robust.min.x, robust.min.y, robust.max.x, robust.max.y]);
+        let sh = sheet.map_or([f64::NAN; 4], |b| [b.min.x, b.min.y, b.max.x, b.max.y]);
+        f64s(&mut out, &sh);
+        f64s(&mut out, &[tol, 0.0]);
+        // início de cada camada em cada seção
+        for count in [|l: &LayerBuf| l.line_idx.len(), |l: &LayerBuf| l.tri_col.len(), |l: &LayerBuf| l.pt_col.len()] {
+            let mut acc = 0u32;
+            out.extend_from_slice(&acc.to_le_bytes());
+            for l in &self.layers {
+                acc += count(l) as u32;
+                out.extend_from_slice(&acc.to_le_bytes());
+            }
+        }
+        // vértices de linha de cada camada (os índices de cada uma são relativos aos seus)
+        let vcount: Vec<u32> = self.layers.iter().map(|l| l.line_col.len() as u32).collect();
+        // seções; cada parte é liberada assim que escrita
+        for l in &mut self.layers {
+            f32s(&mut out, &std::mem::take(&mut l.line_pos));
+        }
+        for l in &mut self.layers {
+            u32s(&mut out, &std::mem::take(&mut l.line_col));
+        }
+        let mut base = 0u32;
+        for (l, n) in self.layers.iter_mut().zip(&vcount) {
+            for i in std::mem::take(&mut l.line_idx) {
+                out.extend_from_slice(&(base + i).to_le_bytes());
+            }
+            base += n;
+        }
+        for l in &mut self.layers {
+            f32s(&mut out, &std::mem::take(&mut l.tri_pos));
+        }
+        for l in &mut self.layers {
+            u32s(&mut out, &std::mem::take(&mut l.tri_col));
+        }
+        for l in &mut self.layers {
+            f32s(&mut out, &std::mem::take(&mut l.pt_pos));
+        }
+        for l in &mut self.layers {
+            u32s(&mut out, &std::mem::take(&mut l.pt_col));
+        }
+        out
+    }
+}
+
+/// Extensão robusta (2% a 98% das caixas, sem o lixo muito distante comum em DWG).
+fn robust_of(boxes: &mut [[f64; 4]]) -> cadcraft_geom::Bounds2 {
+    use cadcraft_geom::Bounds2;
+    if boxes.is_empty() {
+        return Bounds2::new(Vec2::new(0.0, 0.0), Vec2::new(1.0, 1.0));
+    }
+    let (lo, hi) = if boxes.len() > 50 { (0.02, 0.98) } else { (0.0, 1.0) };
+    let col = |k: usize, p: f64| {
+        let mut v: Vec<f64> = boxes.iter().map(|b| b[k]).collect();
+        quantile(&mut v, p)
+    };
+    Bounds2::new(Vec2::new(col(0, lo), col(1, lo)), Vec2::new(col(2, hi), col(3, hi)))
+}
+
+fn display(d: &mut Drawing, space: i32, tolerance: f64, vx0: f64, vy0: f64, vx1: f64, vy1: f64) -> Vec<u8> {
+    use cadcraft_geom::Bounds2;
+    let sp = space_of(d, space);
+    let windowed = matches!(sp, Space::Model) && vx0.is_finite() && vy0.is_finite() && vx1.is_finite() && vy1.is_finite();
+    let ext = d.extents(&sp);
+    let diag = if ext.is_empty() { 1.0 } else { (ext.width().powi(2) + ext.height().powi(2)).sqrt().max(1e-9) };
+    // automática: ~meio pixel com o desenho inteiro numa tela grande (ao aproximar, o
+    // visualizador pede a região visível com tolerância menor)
+    let tol = if tolerance > 0.0 { tolerance } else { diag / 8000.0 };
+    let win = Bounds2::new(Vec2::new(vx0, vy0), Vec2::new(vx1, vy1));
+    let opts = Options {
+        tolerance: tol,
+        min_dash: tol * 6.0,
+        text: true,
+        linetypes: true,
+        fill: true,
+        lineweights: false,
+        view: if windowed { Some(win) } else { None },
+        ..Options::default()
+    };
+    // Camadas como no arquivo (desligadas e congeladas ficam de fora, como no AutoCAD: um bloco
+    // inserido numa camada congelada some inteiro), exceto as que o visualizador mandou mostrar.
+    // A montagem "de plotagem" informa a camada de cada traço, inclusive dentro de blocos.
+    let saved: Vec<(bool, bool)> = d.layers.iter().map(|l| (l.on, l.frozen)).collect();
+    FORCED.with(|f| {
+        for (l, &on) in d.layers.iter_mut().zip(f.borrow().iter()) {
+            if on != 0 {
+                l.on = true;
+                l.frozen = false;
+            }
+        }
+    });
+    let n_layers = d.layers.len() + 1; // a última: traços sem camada conhecida
+    let (sink, robust, sheet) = if matches!(sp, Space::Model) {
+        // objetos a montar (no detalhe, só os que tocam a janela) e o enquadramento pelas caixas
+        let mut cache = cadcraft_doc::BlockBoundsCache::default();
+        let mut ents = Vec::new();
+        let mut boxes = Vec::new();
+        for e in d.model.iter() {
+            let b = cadcraft_doc::extent_bounds_cached(d, e, &mut cache);
+            if windowed && !(b.is_empty() || (b.max.x >= win.min.x && b.min.x <= win.max.x && b.max.y >= win.min.y && b.min.y <= win.max.y)) {
+                continue;
+            }
+            let shown = d.layer(&e.common.layer).is_none_or(|l| l.on && !l.frozen) && e.common.visible;
+            if shown && !b.is_empty() && [b.min.x, b.min.y, b.max.x, b.max.y].iter().all(|v| v.is_finite()) {
+                boxes.push([b.min.x, b.min.y, b.max.x, b.max.y]);
+            }
+            ents.push(e.clone());
+        }
+        let robust = robust_of(&mut boxes);
+        drop(boxes);
+        let mut sink = Sink::new(n_layers, robust);
+        build_model(d, ents, &opts, |list| {
+            sink.add(&list);
+            if sink.points > MAX_TOTAL_POINTS {
+                // memória: o resto aparece no detalhe ao aproximar
+                sink.truncated = true;
+                return false;
+            }
+            true
+        });
+        (sink, robust, None)
+    } else {
+        let list = cadcraft_render::build_plot(d, &sp, &opts);
+        let mut boxes: Vec<[f64; 4]> = list
+            .prims
+            .iter()
+            .filter_map(|p| {
+                let b = Bounds2::from_points(list.points(p).iter().copied().filter(|q| q.x.is_finite() && q.y.is_finite()));
+                (!b.is_empty()).then_some([b.min.x, b.min.y, b.max.x, b.max.y])
+            })
+            .collect();
+        // folha: o enquadramento é o papel
+        let sheet = list.sheet.as_ref().map(cadcraft_render::Sheet::bounds).filter(|b| !b.is_empty() && b.width() > 0.0 && b.height() > 0.0);
+        let robust = sheet.unwrap_or_else(|| robust_of(&mut boxes));
+        let mut sink = Sink::new(n_layers, robust);
+        sink.add(&list);
+        (sink, robust, sheet)
+    };
+    for (l, (on, frozen)) in d.layers.iter_mut().zip(saved) {
+        l.on = on;
+        l.frozen = frozen;
+    }
+    sink.finish(robust, sheet, tol)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -970,6 +1141,7 @@ fn raw_doc(d: &Drawing) -> String {
         r.w.str(&l.name);
         r.w.raw(&format!(",\"color\":\"#{:02x}{:02x}{:02x}\"", rgb.0, rgb.1, rgb.2));
         r.w.raw(if l.on && !l.frozen { ",\"visible\":true" } else { ",\"visible\":false" });
+        r.w.raw(if l.frozen { ",\"frozen\":true" } else { ",\"frozen\":false" });
         r.w.raw(if l.locked { ",\"locked\":true}" } else { ",\"locked\":false}" });
     }
     r.w.raw("],\"entities\":[");
