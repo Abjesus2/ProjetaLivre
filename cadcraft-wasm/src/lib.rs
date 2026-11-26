@@ -13,6 +13,8 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use cadcraft_doc::{Drawing, Space};
+
+mod tilted;
 use cadcraft_render::{Kind, Options};
 
 thread_local! {
@@ -66,7 +68,12 @@ pub unsafe extern "C" fn pl_open(ptr: *const u8, len: usize, name_ptr: *const u8
     // DWG: no worker do navegador a conversão roda no próprio processo (o worker é o isolamento)
     craft_dwg::allow_in_process();
     match cadcraft_io::read(bytes, &name) {
-        Ok(d) => {
+        Ok(mut d) => {
+            // blocos inseridos fora do plano XY: projetados na planta, como o AutoCAD mostra
+            let n = tilted::bake(&mut d);
+            if n > 0 {
+                d.read_notes.push(format!("{n} objetos fora do plano XY (blocos, círculos, arcos, elipses) projetados na planta"));
+            }
             DRAWING.with(|s| *s.borrow_mut() = Some(d));
             set_result(Vec::new());
             0

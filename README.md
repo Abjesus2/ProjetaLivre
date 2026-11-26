@@ -31,6 +31,9 @@ animações) foi escrito para este projeto, em TypeScript, sem framework.
   Camadas desligadas ou congeladas no arquivo ficam de fora como no AutoCAD (um bloco inserido
   numa camada congelada some inteiro) e podem ser ligadas no painel (a imagem é refeita).
   Desenhos com milhões de cópias de blocos são montados em partes, sem cortar o fim.
+- Blocos, círculos, arcos e elipses fora do plano XY (por exemplo, uma vista lateral inserida
+  "em pé" num desenho 3D) são projetados na planta como o AutoCAD mostra visto de cima — no
+  visualizador e no editor.
 - **Salvar como:** `.plv`, `.dxf`, `.svg`, `.pdf`, `.png`, `.jpg`, `.webp`, `.plt` (HPGL para plotters),
   `.gcode` (laser/CNC) e `.geojson` (SIG).
 - **Desenhar:** linha, polilinha, retângulo, círculo, arco por 3 pontos, elipse, polígono, ponto.

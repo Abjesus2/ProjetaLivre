@@ -129,6 +129,44 @@ check('muitos blocos: imagem completa, sem corte', !img.truncated && segs(img, i
 check('muitos blocos: o último objeto do desenho aparece', segs(img, info, 'FIM') > 0);
 check('muitos blocos: lista coerente', coherent(img).length === 0, coherent(img).join('; '));
 
+// ---- bloco inserido em pé (extrusão (0,-1,0): uma vista lateral 100×300 num desenho 3D), solto e
+// dentro de outro bloco: visto de cima, fica de perfil (vira uma linha na posição dele), como no
+// AutoCAD; antes aparecia deitado na planta, com linhas compridas que não existem na vista de cima.
+const tiltDxf = () => {
+  const o = []; const g = (c, v) => o.push(String(c), String(v));
+  g(0, 'SECTION'); g(2, 'HEADER'); g(9, '$ACADVER'); g(1, 'AC1009'); g(0, 'ENDSEC');
+  g(0, 'SECTION'); g(2, 'TABLES'); g(0, 'TABLE'); g(2, 'LAYER'); g(70, 3);
+  for (const [n, c] of [['0', 7], ['ELEV', 8], ['PLANTA', 3]]) { g(0, 'LAYER'); g(2, n); g(70, 0); g(62, c); g(6, 'CONTINUOUS'); }
+  g(0, 'ENDTAB'); g(0, 'ENDSEC'); g(0, 'SECTION'); g(2, 'BLOCKS');
+  g(0, 'BLOCK'); g(8, '0'); g(2, 'ELEV'); g(70, 0); g(10, 0); g(20, 0); g(30, 0); g(3, 'ELEV');
+  for (const x of [0, 50, 100]) { g(0, 'LINE'); g(8, 'ELEV'); g(10, x); g(20, 0); g(30, 0); g(11, x); g(21, 300); g(31, 0); }
+  for (const y of [0, 100, 200, 300]) { g(0, 'LINE'); g(8, 'ELEV'); g(10, 0); g(20, y); g(30, 0); g(11, 100); g(21, y); g(31, 0); }
+  g(0, 'ENDBLK'); g(8, '0');
+  g(0, 'BLOCK'); g(8, '0'); g(2, 'GRUPO'); g(70, 0); g(10, 0); g(20, 0); g(30, 0); g(3, 'GRUPO');
+  g(0, 'INSERT'); g(8, '0'); g(2, 'ELEV'); g(10, 500); g(20, 0); g(30, -200); g(210, 0); g(220, -1); g(230, 0);
+  g(0, 'ENDBLK'); g(8, '0'); g(0, 'ENDSEC');
+  g(0, 'SECTION'); g(2, 'ENTITIES');
+  g(0, 'LINE'); g(8, 'PLANTA'); g(10, 400); g(20, 150); g(30, 0); g(11, 700); g(21, 150); g(31, 0);
+  g(0, 'INSERT'); g(8, '0'); g(2, 'ELEV'); g(10, 500); g(20, 0); g(30, -200); g(210, 0); g(220, -1); g(230, 0);
+  g(0, 'INSERT'); g(8, '0'); g(2, 'GRUPO'); g(10, 0); g(20, 1000); g(30, 0);
+  // círculo e arco em pé (centros no mundo (700,200,50) e (900,200,50))
+  g(0, 'CIRCLE'); g(8, 'ELEV'); g(10, 700); g(20, 50); g(30, -200); g(40, 40); g(210, 0); g(220, -1); g(230, 0);
+  g(0, 'ARC'); g(8, 'ELEV'); g(10, 900); g(20, 50); g(30, -200); g(40, 40); g(50, 0); g(51, 180); g(210, 0); g(220, -1); g(230, 0);
+  g(0, 'ENDSEC'); g(0, 'EOF');
+  return new TextEncoder().encode(o.join('\n') + '\n');
+};
+cc.open(tiltDxf(), 'em-pe.dxf');
+info = cc.info();
+img = parseDisplay(cc.display(0));
+const li = info.layers.findIndex((l) => l.name === 'ELEV');
+const ys = [];
+for (let k = img.lineStart[li]; k < img.lineStart[li + 1]; k++) ys.push(img.linePos[img.lineIdx[k] * 2 + 1] + img.origin.y);
+const near = (v, t) => Math.abs(v - t) < 1e-3;
+check('bloco, círculo e arco em pé ficam de perfil na vista de cima (também dentro de outro bloco)', ys.length > 0 && ys.every((y) => near(y, 200) || near(y, 1200)) && ys.some((y) => near(y, 1200)), `y em ${[...new Set(ys.map((y) => y.toFixed(1)))].join(', ')}`);
+const edT = fromRaw(JSON.parse(cc.raw()), 't', () => {});
+const ysEd = edT.drawing.entities.filter((e) => e.layer === 'ELEV').flatMap((e) => (e.type === 'line' ? [e.a.y, e.b.y] : (e.pts ?? []).map((q) => q.y)));
+check('no editor também', ysEd.length > 0 && ysEd.every((y) => near(y, 200) || near(y, 1200)));
+
 // ---- arquivo inválido: erro com mensagem, e o leitor continua funcionando
 let msg = '';
 try { cc.open(new TextEncoder().encode('isto não é um desenho'), 'ruim.dwg'); } catch (e) { msg = e.message; }
